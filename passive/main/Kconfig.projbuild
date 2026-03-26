@@ -44,4 +44,37 @@ menu "ESP32 CSI Tool Config"
             Sending data to an SD card can take time and buffer space.
             If your ESP32 does not have an SD card, there is no reason to use this feature.
             If you do though, the program will be recognize this and not attempt writing to the SD card.
+
+    menu "ISAC MAC Filter (optional)"
+        depends on SHOULD_COLLECT_CSI
+        comment "Leave blank to collect CSI from every sender on the channel."
+        comment "Fill in the MAC(s) of the devices whose communication you want to sense"
+        comment "(e.g. your PC and your router). Format: AA:BB:CC:DD:EE:FF"
+        comment "You can also add/remove MACs at runtime via the WATCHMAC / CLEARMAC serial commands."
+
+        config ISAC_WATCH_MAC_1
+            string "Watched MAC address #1 (e.g. your PC)"
+            default ""
+            help
+                First MAC address to watch. CSI will only be recorded from senders in this list.
+                Leave empty to disable compile-time filtering (filtering can still be enabled at runtime).
+
+        config ISAC_WATCH_MAC_2
+            string "Watched MAC address #2 (e.g. your router/AP)"
+            default ""
+            help
+                Second MAC address to watch.
+
+        config ISAC_WATCH_MAC_3
+            string "Watched MAC address #3"
+            default ""
+            help
+                Third MAC address to watch.
+
+        config ISAC_WATCH_MAC_4
+            string "Watched MAC address #4"
+            default ""
+            help
+                Fourth MAC address to watch.
+    endmenu
 endmenu

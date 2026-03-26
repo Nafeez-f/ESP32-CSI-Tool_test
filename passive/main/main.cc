@@ -62,6 +62,22 @@ void config_print() {
     printf("SEND_CSI_TO_SERIAL: %d\n", SEND_CSI_TO_SERIAL);
     printf("SEND_CSI_TO_SD: %d\n", SEND_CSI_TO_SD);
     printf("-----------------------\n");
+    printf("ISAC MODE\n");
+    printf("  Compile-time MAC filter:\n");
+#ifdef CONFIG_ISAC_WATCH_MAC_1
+    if (strlen(CONFIG_ISAC_WATCH_MAC_1) > 0) printf("    MAC_1: %s\n", CONFIG_ISAC_WATCH_MAC_1);
+#endif
+#ifdef CONFIG_ISAC_WATCH_MAC_2
+    if (strlen(CONFIG_ISAC_WATCH_MAC_2) > 0) printf("    MAC_2: %s\n", CONFIG_ISAC_WATCH_MAC_2);
+#endif
+#ifdef CONFIG_ISAC_WATCH_MAC_3
+    if (strlen(CONFIG_ISAC_WATCH_MAC_3) > 0) printf("    MAC_3: %s\n", CONFIG_ISAC_WATCH_MAC_3);
+#endif
+#ifdef CONFIG_ISAC_WATCH_MAC_4
+    if (strlen(CONFIG_ISAC_WATCH_MAC_4) > 0) printf("    MAC_4: %s\n", CONFIG_ISAC_WATCH_MAC_4);
+#endif
+    printf("  Runtime commands: TAG: <label> | WATCHMAC: <mac> | CLEARMAC\n");
+    printf("-----------------------\n");
     printf("\n\n\n\n\n\n\n\n");
 }
 
