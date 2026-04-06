@@ -70,7 +70,7 @@ python isac_filter.py data.csv --activity youtube --out youtube.csv
 python isac_filter.py data.csv --plot
 
 ----------------------------------------------------------------------
-CSV column layout (27 fixed columns before the CSI bracket)
+CSV column layout (33 fixed columns before the CSI bracket)
 ----------------------------------------------------------------------
   0  type            1  role            2  mac
   3  rssi            4  rate            5  sig_mode
@@ -80,7 +80,16 @@ CSV column layout (27 fixed columns before the CSI bracket)
   15 ampdu_cnt      16 channel         17 secondary_channel
   18 local_timestamp 19 ant            20 sig_len
   21 rx_state       22 real_time_set   23 real_timestamp
-  24 len            25 activity        26 CSI_DATA  ← bracket column
+  24 len
+  25 seq_num    ← 802.11 sequence number; gap = lost frame = missing CSI sample
+  26 retry      ← 1=retransmission; high rate = bad channel / interference
+  27 to_ds      ← 1=uplink frame (MacBook → router)
+  28 from_ds    ← 1=downlink frame (router → MacBook)
+  29 tid        ← QoS Traffic ID: 4/5=Video, 0/3=BestEffort, 1/2=Background, 6/7=Voice
+  30 is_qos     ← 1=QoS data frame (always 1 for 802.11n/ac traffic)
+  31 duration   ← NAV channel reservation in µs
+  32 activity   ← your runtime TAG label
+  33 CSI_DATA   ← bracket column [im re im re ...]
 """
 
 import sys
@@ -102,8 +111,20 @@ COL_AMPDU_CNT  = 15
 COL_SIG_LEN    = 20
 COL_REAL_TS    = 23
 COL_LEN        = 24
-COL_ACTIVITY   = 25
-COL_CSI        = 26
+COL_SEQ_NUM    = 25
+COL_RETRY      = 26
+COL_TO_DS      = 27
+COL_FROM_DS    = 28
+COL_TID        = 29
+COL_IS_QOS     = 30
+COL_DURATION   = 31
+COL_ACTIVITY   = 32
+COL_CSI        = 33
+
+TID_LABELS = {
+    0: "BestEffort",  1: "Background",  2: "Background",  3: "BestEffort",
+    4: "Video",       5: "Video",        6: "Voice",        7: "Voice",
+}
 
 
 # ---- CLI -------------------------------------------------------------------
@@ -177,11 +198,22 @@ def normalise_mac(mac):
     return mac.strip().upper()
 
 
+def _int_or(s, default=-1):
+    try:
+        return int(s.strip())
+    except (ValueError, AttributeError):
+        return default
+
+def _float_or(s, default=float("nan")):
+    try:
+        return float(s.strip())
+    except (ValueError, AttributeError):
+        return default
+
+
 def load_csv(path, watch_macs, activity_filter):
     """
-    Yield filtered rows as dicts with keys:
-      mac, rssi, rate, mcs, noise_floor, ampdu_cnt, sig_len,
-      real_timestamp, activity, amplitudes (list of floats), raw (original line)
+    Yield filtered rows as dicts with all parsed fields.
     """
     watch_macs_upper = {normalise_mac(m) for m in (watch_macs or [])}
 
@@ -206,20 +238,40 @@ def load_csv(path, watch_macs, activity_filter):
                 if activity != want:
                     continue
 
-            try:
-                rssi       = int(parts[COL_RSSI])
-                rate       = int(parts[COL_RATE])
-                mcs        = int(parts[COL_MCS])
-                noise_fl   = int(parts[COL_NOISE_FL])
-                ampdu_cnt  = int(parts[COL_AMPDU_CNT])
-                sig_len    = int(parts[COL_SIG_LEN])
-                real_ts    = float(parts[COL_REAL_TS])
-            except ValueError:
+            rssi      = _int_or(parts[COL_RSSI])
+            rate      = _int_or(parts[COL_RATE])
+            mcs       = _int_or(parts[COL_MCS])
+            noise_fl  = _int_or(parts[COL_NOISE_FL])
+            ampdu_cnt = _int_or(parts[COL_AMPDU_CNT])
+            sig_len   = _int_or(parts[COL_SIG_LEN])
+            real_ts   = _float_or(parts[COL_REAL_TS])
+            # 802.11 MAC header fields (-1 = not yet cached on firmware side)
+            seq_num   = _int_or(parts[COL_SEQ_NUM])
+            retry     = _int_or(parts[COL_RETRY])
+            to_ds     = _int_or(parts[COL_TO_DS])
+            from_ds   = _int_or(parts[COL_FROM_DS])
+            tid       = _int_or(parts[COL_TID])
+            is_qos    = _int_or(parts[COL_IS_QOS])
+            duration  = _int_or(parts[COL_DURATION])
+
+            if math.isnan(real_ts):
                 continue
 
             amps = parse_csi_amplitudes(parts[COL_CSI])
             if not amps:
                 continue
+
+            # Derive frame direction from ds bits
+            if to_ds == 1 and from_ds == 0:
+                direction = "uplink"
+            elif to_ds == 0 and from_ds == 1:
+                direction = "downlink"
+            elif to_ds == 1 and from_ds == 1:
+                direction = "wds"       # wireless distribution system (rare)
+            else:
+                direction = "ibss"      # ad-hoc / unknown
+
+            tid_label = TID_LABELS.get(tid, "unknown") if tid >= 0 else "unknown"
 
             yield {
                 "mac":           mac,
@@ -230,6 +282,17 @@ def load_csv(path, watch_macs, activity_filter):
                 "ampdu_cnt":     ampdu_cnt,
                 "sig_len":       sig_len,
                 "real_timestamp": real_ts,
+                # 802.11 MAC header
+                "seq_num":       seq_num,
+                "retry":         retry,
+                "to_ds":         to_ds,
+                "from_ds":       from_ds,
+                "tid":           tid,
+                "tid_label":     tid_label,
+                "is_qos":        is_qos,
+                "duration":      duration,
+                "direction":     direction,
+                # labels
                 "activity":      activity if activity else "(unlabelled)",
                 "amplitudes":    amps,
                 "raw":           line,
@@ -241,10 +304,32 @@ def load_csv(path, watch_macs, activity_filter):
 def compute_stats(rows_by_activity):
     stats = {}
     for act, rows in rows_by_activity.items():
-        all_amps  = [a for r in rows for a in r["amplitudes"]]
-        rssis     = [r["rssi"] for r in rows]
-        sig_lens  = [r["sig_len"] for r in rows]
-        mcs_vals  = [r["mcs"] for r in rows]
+        all_amps   = [a for r in rows for a in r["amplitudes"]]
+        rssis      = [r["rssi"] for r in rows]
+        sig_lens   = [r["sig_len"] for r in rows]
+        mcs_vals   = [r["mcs"] for r in rows]
+        retry_vals = [r["retry"] for r in rows if r["retry"] >= 0]
+        tid_vals   = [r["tid"] for r in rows if r["tid"] >= 0]
+
+        # Direction breakdown
+        n_up   = sum(1 for r in rows if r["direction"] == "uplink")
+        n_down = sum(1 for r in rows if r["direction"] == "downlink")
+
+        # TID label breakdown
+        tid_counts = {}
+        for r in rows:
+            lbl = r["tid_label"]
+            tid_counts[lbl] = tid_counts.get(lbl, 0) + 1
+
+        # Sequence number gap analysis (detect lost frames = missing CSI)
+        seq_valid = [r["seq_num"] for r in sorted(rows, key=lambda x: x["real_timestamp"])
+                     if r["seq_num"] >= 0]
+        lost_frames = 0
+        for i in range(1, len(seq_valid)):
+            gap = (seq_valid[i] - seq_valid[i-1]) % 4096
+            if 1 < gap < 100:   # >1 = gap; <100 = not a wrap or unrelated frame
+                lost_frames += gap - 1
+
         stats[act] = {
             "count":        len(rows),
             "mean_amp":     _stats.mean(all_amps),
@@ -252,6 +337,11 @@ def compute_stats(rows_by_activity):
             "mean_rssi":    _stats.mean(rssis),
             "mean_sig_len": _stats.mean(sig_lens),
             "mean_mcs":     _stats.mean(mcs_vals),
+            "retry_rate":   (_stats.mean(retry_vals) * 100) if retry_vals else -1,
+            "n_uplink":     n_up,
+            "n_downlink":   n_down,
+            "tid_counts":   tid_counts,
+            "lost_frames":  lost_frames,
         }
     return stats
 
@@ -260,10 +350,10 @@ def print_stats(stats, rows_by_activity):
     print("\n=== ISAC per-activity statistics ===")
     for act in sorted(stats):
         s = stats[act]
-        macs = {r["mac"] for r in rows_by_activity[act]}
         rows = rows_by_activity[act]
+        macs = {r["mac"] for r in rows}
 
-        # Estimate inter-frame interval if timestamps are available
+        # Estimate inter-frame interval
         ts_sorted = sorted(r["real_timestamp"] for r in rows)
         if len(ts_sorted) > 1:
             ifis = [ts_sorted[i+1] - ts_sorted[i] for i in range(len(ts_sorted)-1)]
@@ -273,20 +363,30 @@ def print_stats(stats, rows_by_activity):
             mean_ifi = float("nan")
             csi_rate = float("nan")
 
-        print(f"\n  Activity      : '{act}'")
-        print(f"  Frames        : {s['count']}")
-        print(f"  MACs seen     : {', '.join(sorted(macs))}")
-        print(f"  Mean RSSI     : {s['mean_rssi']:.1f} dBm")
-        print(f"  Mean sig_len  : {s['mean_sig_len']:.0f} bytes  "
-              f"← frame payload size (large = active download)")
-        print(f"  Mean MCS      : {s['mean_mcs']:.1f}            "
-              f"← modulation index (high = fast link)")
-        print(f"  Mean IFI      : {mean_ifi*1000:.1f} ms         "
-              f"← inter-frame interval")
-        print(f"  CSI rate      : {csi_rate:.1f} samples/sec     "
-              f"← sensing temporal resolution (driven by traffic)")
-        print(f"  Amp mean      : {s['mean_amp']:.3f}")
-        print(f"  Amp std       : {s['std_amp']:.3f}")
+        tid_str = ", ".join(f"{k}:{v}" for k, v in sorted(s["tid_counts"].items(),
+                                                            key=lambda x: -x[1]))
+        print(f"\n  Activity       : '{act}'")
+        print(f"  Frames         : {s['count']}")
+        print(f"  MACs seen      : {', '.join(sorted(macs))}")
+        print(f"  Direction      : {s['n_downlink']} downlink (router→device), "
+              f"{s['n_uplink']} uplink (device→router)")
+        print(f"  Traffic type   : {tid_str}")
+        print(f"    TID key: Video=4/5, BestEffort=0/3, Background=1/2, Voice=6/7")
+        print(f"  Retry rate     : {s['retry_rate']:.1f}%"
+              f"  ← high = bad channel / interference / congestion")
+        print(f"  Lost frames    : {s['lost_frames']}"
+              f"  ← sequence number gaps = missing CSI samples")
+        print(f"  Mean RSSI      : {s['mean_rssi']:.1f} dBm")
+        print(f"  Mean sig_len   : {s['mean_sig_len']:.0f} bytes"
+              f"  ← ~1460=active download, ~14=idle ACKs only")
+        print(f"  Mean MCS       : {s['mean_mcs']:.1f}"
+              f"          ← 0=1Mbps legacy, 7=65Mbps (802.11n best)")
+        print(f"  Mean IFI       : {mean_ifi*1000:.1f} ms"
+              f"      ← inter-frame interval")
+        print(f"  CSI rate       : {csi_rate:.1f} samples/sec"
+              f"  ← sensing resolution (driven by traffic)")
+        print(f"  CSI amp mean   : {s['mean_amp']:.3f}")
+        print(f"  CSI amp std    : {s['std_amp']:.3f}")
     print()
 
 
@@ -342,14 +442,18 @@ def plot_isac_analysis(rows, window_sec=1.0):
     ])
     activities = [r["activity"] for r in rows]
 
+    retries   = np.array([r["retry"]   for r in rows], dtype=float)
+    tid_arr   = np.array([r["tid"]     for r in rows], dtype=float)
+
     max_t = float(ts[-1])
     bin_edges = np.arange(0, max_t + window_sec, window_sec)
     bin_centers = bin_edges[:-1] + window_sec / 2.0
 
-    throughput   = []   # bytes per second (Panel 1)
-    csi_variance = []   # amplitude std per second (Panel 2)
-    frame_rate   = []   # frames per second (Panel 3)
-    mean_rssi_bin = []
+    throughput    = []   # bytes per second (Panel 1)
+    csi_variance  = []   # amplitude std per second (Panel 2)
+    frame_rate    = []   # frames per second (Panel 3)
+    retry_pct     = []   # retransmission % per second (Panel 4)
+    video_pct     = []   # fraction of frames with Video TID (4 or 5) (Panel 1 overlay)
 
     for b_start, b_end in zip(bin_edges[:-1], bin_edges[1:]):
         mask = (ts >= b_start) & (ts < b_end)
@@ -358,37 +462,46 @@ def plot_isac_analysis(rows, window_sec=1.0):
             throughput.append(0.0)
             csi_variance.append(0.0)
             frame_rate.append(0)
-            mean_rssi_bin.append(float("nan"))
+            retry_pct.append(0.0)
+            video_pct.append(0.0)
             continue
 
-        # Bytes on air: sig_len already includes all aggregated MPDUs in the PPDU
         throughput.append(float(sig_lens[mask].sum()))
 
-        # CSI sensing signal: variance of mean amplitude within this bin
         amps_in_bin = mean_amps[mask]
         csi_variance.append(float(np.std(amps_in_bin)) if n > 1 else 0.0)
 
         frame_rate.append(n)
-        mean_rssi_bin.append(float(np.mean(rssis[mask])))
+
+        valid_retry = retries[mask]
+        valid_retry = valid_retry[valid_retry >= 0]
+        retry_pct.append(float(np.mean(valid_retry) * 100) if len(valid_retry) > 0 else 0.0)
+
+        valid_tid = tid_arr[mask]
+        valid_tid = valid_tid[valid_tid >= 0]
+        vpct = float(np.mean((valid_tid == 4) | (valid_tid == 5)) * 100) if len(valid_tid) > 0 else 0.0
+        video_pct.append(vpct)
 
     throughput   = np.array(throughput)
     csi_variance = np.array(csi_variance)
     frame_rate   = np.array(frame_rate, dtype=float)
+    retry_pct    = np.array(retry_pct)
+    video_pct    = np.array(video_pct)
 
     # Activity colour bands
     unique_acts = sorted(set(activities))
     cmap = plt.cm.tab10
     act_colors = {a: cmap(i / max(len(unique_acts), 1)) for i, a in enumerate(unique_acts)}
 
-    fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
+    fig, axes = plt.subplots(4, 1, figsize=(14, 13), sharex=True)
     fig.suptitle(
-        "ISAC Analysis: Communication Load  +  Channel Sensing  (same frames)",
+        "ISAC Analysis — Communication + Sensing from the same Wi-Fi frames",
         fontsize=13, fontweight="bold"
     )
 
     def add_activity_bands(ax):
         """Shade background by activity label."""
-        if len(unique_acts) <= 1 and list(unique_acts)[0] == "(unlabelled)":
+        if len(unique_acts) == 1 and "(unlabelled)" in unique_acts:
             return
         prev_act = activities[0]
         seg_start = ts[0]
@@ -399,14 +512,19 @@ def plot_isac_analysis(rows, window_sec=1.0):
                 prev_act = activities[i]
                 seg_start = ts[i]
 
-    # --- Panel 1: Communication load ---
+    # --- Panel 1: Communication load + Video TID overlay ---
+    ax1_twin = axes[0].twinx()
     axes[0].bar(bin_centers, throughput / 1000.0, width=window_sec * 0.85,
-                color="steelblue", alpha=0.8)
+                color="steelblue", alpha=0.7, label="KB/s")
+    ax1_twin.plot(bin_centers, video_pct, color="navy", linewidth=1.2,
+                  linestyle="--", label="Video TID %")
     add_activity_bands(axes[0])
-    axes[0].set_ylabel("Throughput\n(KB / second)", fontsize=10)
+    axes[0].set_ylabel("Throughput (KB/s)", fontsize=9)
+    ax1_twin.set_ylabel("Video TID %", fontsize=9, color="navy")
     axes[0].set_title(
-        "Panel 1 — Communication load (sig_len bytes per second)\n"
-        "High during YouTube download, near-zero during idle", fontsize=9
+        "Panel 1 — Communication load  (sig_len sum per second)\n"
+        "Dashed = % of frames with Video TID (4/5) — rises when YouTube is active",
+        fontsize=9
     )
     axes[0].grid(axis="y", alpha=0.3)
 
@@ -414,24 +532,39 @@ def plot_isac_analysis(rows, window_sec=1.0):
     axes[1].bar(bin_centers, csi_variance, width=window_sec * 0.85,
                 color="darkorange", alpha=0.8)
     add_activity_bands(axes[1])
-    axes[1].set_ylabel("CSI amplitude\nstd dev", fontsize=10)
+    axes[1].set_ylabel("CSI amp std dev", fontsize=9)
     axes[1].set_title(
-        "Panel 2 — Channel dynamics / sensing signal (std of CSI amplitude per second)\n"
-        "Spikes when physical environment changes (person moving, objects shifting)", fontsize=9
+        "Panel 2 — Channel dynamics / SENSING signal  (std of CSI amplitude per second)\n"
+        "Spikes = something physically moved in the space (person, hand, door opening)",
+        fontsize=9
     )
     axes[1].grid(axis="y", alpha=0.3)
 
-    # --- Panel 3: CSI sampling rate ---
-    axes[2].bar(bin_centers, frame_rate, width=window_sec * 0.85,
-                color="seagreen", alpha=0.8)
+    # --- Panel 3: Retry rate ---
+    axes[2].bar(bin_centers, retry_pct, width=window_sec * 0.85,
+                color="firebrick", alpha=0.8)
     add_activity_bands(axes[2])
-    axes[2].set_ylabel("CSI samples\n(frames / sec)", fontsize=10)
+    axes[2].set_ylabel("Retry %", fontsize=9)
     axes[2].set_title(
-        "Panel 3 — CSI sampling rate (driven by Wi-Fi traffic)\n"
-        "More communication → more frames → higher sensing temporal resolution", fontsize=9
+        "Panel 3 — Retransmission rate  (retry flag from 802.11 header)\n"
+        "High = bad channel / interference / heavy congestion on the AP",
+        fontsize=9
     )
-    axes[2].set_xlabel("Time (seconds)", fontsize=10)
     axes[2].grid(axis="y", alpha=0.3)
+
+    # --- Panel 4: CSI sampling rate ---
+    axes[3].bar(bin_centers, frame_rate, width=window_sec * 0.85,
+                color="seagreen", alpha=0.8)
+    add_activity_bands(axes[3])
+    axes[3].set_ylabel("CSI samples/sec", fontsize=9)
+    axes[3].set_title(
+        "Panel 4 — CSI sampling rate  (number of frames per second)\n"
+        "More communication → more frames → higher sensing temporal resolution"
+        " — this is the ISAC coupling",
+        fontsize=9
+    )
+    axes[3].set_xlabel("Time (seconds)", fontsize=10)
+    axes[3].grid(axis="y", alpha=0.3)
 
     # Legend for activity bands
     if not (len(unique_acts) == 1 and "(unlabelled)" in unique_acts):
@@ -444,18 +577,19 @@ def plot_isac_analysis(rows, window_sec=1.0):
 
     # Print summary table
     print("\n=== ISAC time-bin summary ===")
-    print(f"{'Time (s)':<12} {'KB/s':>8} {'CSI std':>9} {'fps':>6}  Activity")
-    print("-" * 52)
+    print(f"{'Time(s)':<9} {'KB/s':>7} {'VideoTID%':>9} {'CsiStd':>8} "
+          f"{'Retry%':>7} {'fps':>5}  Activity")
+    print("-" * 60)
     for i, bc in enumerate(bin_centers):
-        # Find dominant activity in this bin
         mask = (ts >= bin_edges[i]) & (ts < bin_edges[i+1])
         if mask.sum() > 0:
             acts_in_bin = [activities[j] for j in range(len(ts)) if mask[j]]
             dom_act = max(set(acts_in_bin), key=acts_in_bin.count)
         else:
             dom_act = ""
-        print(f"{bc:<12.1f} {throughput[i]/1000:>8.1f} {csi_variance[i]:>9.3f} "
-              f"{frame_rate[i]:>6.0f}  {dom_act}")
+        print(f"{bc:<9.1f} {throughput[i]/1000:>7.1f} {video_pct[i]:>9.1f} "
+              f"{csi_variance[i]:>8.3f} {retry_pct[i]:>7.1f} "
+              f"{frame_rate[i]:>5.0f}  {dom_act}")
 
     plt.show()
 

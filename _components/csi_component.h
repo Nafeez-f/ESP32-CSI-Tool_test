@@ -2,6 +2,7 @@
 #define ESP32_CSI_CSI_COMPONENT_H
 
 #include "time_component.h"
+#include "frame_header_component.h"
 #include "math.h"
 #include <sstream>
 #include <iostream>
@@ -82,11 +83,26 @@ void _wifi_csi_cb(void *ctx, wifi_csi_info_t *data) {
     // Drop frames from MACs we are not interested in (ISAC filter)
     if (!_mac_is_watched(d.mac)) return;
 
+    // Drop samples where the ESP32 hardware flagged the first 4 CSI bytes as
+    // invalid.  These produce garbage amplitude values and corrupt any
+    // time-series analysis that expects clean complex coefficients.
+    if (d.first_word_invalid) return;
+
     xSemaphoreTake(mutex, portMAX_DELAY);
     std::stringstream ss;
 
     char mac[20] = {0};
     sprintf(mac, "%02X:%02X:%02X:%02X:%02X:%02X", d.mac[0], d.mac[1], d.mac[2], d.mac[3], d.mac[4], d.mac[5]);
+
+    // Fetch 802.11 MAC header fields cached by the promiscuous RX callback
+    const mac_frame_cache_t *fh = frame_header_get(d.mac);
+    int  fh_retry    = fh ? fh->retry    : -1;
+    int  fh_seq_num  = fh ? fh->seq_num  : -1;
+    int  fh_to_ds    = fh ? fh->to_ds    : -1;
+    int  fh_from_ds  = fh ? fh->from_ds  : -1;
+    int  fh_tid      = fh ? fh->tid      : -1;
+    int  fh_is_qos   = fh ? fh->is_qos   : -1;
+    int  fh_duration = fh ? fh->duration : -1;
 
     ss << "CSI_DATA,"
        << project_type << ","
@@ -114,6 +130,15 @@ void _wifi_csi_cb(void *ctx, wifi_csi_info_t *data) {
        << real_time_set << ","
        << get_steady_clock_timestamp() << ","
        << data->len << ","
+       // 802.11 MAC header fields (from frame_header_component.h)
+       // -1 means the promiscuous cache has not seen this MAC yet
+       << fh_seq_num  << ","   // 802.11 sequence number (gap = lost frame = missing CSI)
+       << fh_retry    << ","   // retransmission: 1=bad channel/congestion
+       << fh_to_ds    << ","   // 1=uplink (MacBook→router)
+       << fh_from_ds  << ","   // 1=downlink (router→MacBook)
+       << fh_tid      << ","   // QoS TID: 4/5=Video, 0/3=BestEffort, 1/2=Background, 6/7=Voice
+       << fh_is_qos   << ","   // 1=QoS data frame (HT/VHT traffic), 0=legacy
+       << fh_duration << ","   // NAV in µs: channel reservation duration
        // ISAC: activity label for this sample (empty string if unlabelled)
        << isac_activity_label << ",[";
 
@@ -151,7 +176,7 @@ int8_t *my_ptr;
 }
 
 void _print_csi_csv_header() {
-    char *header_str = (char *) "type,role,mac,rssi,rate,sig_mode,mcs,bandwidth,smoothing,not_sounding,aggregation,stbc,fec_coding,sgi,noise_floor,ampdu_cnt,channel,secondary_channel,local_timestamp,ant,sig_len,rx_state,real_time_set,real_timestamp,len,activity,CSI_DATA\n";
+    char *header_str = (char *) "type,role,mac,rssi,rate,sig_mode,mcs,bandwidth,smoothing,not_sounding,aggregation,stbc,fec_coding,sgi,noise_floor,ampdu_cnt,channel,secondary_channel,local_timestamp,ant,sig_len,rx_state,real_time_set,real_timestamp,len,seq_num,retry,to_ds,from_ds,tid,is_qos,duration,activity,CSI_DATA\n";
     outprintf(header_str);
 }
 
@@ -159,6 +184,10 @@ void csi_init(char *type) {
     project_type = type;
 
 #ifdef CONFIG_SHOULD_COLLECT_CSI
+    // Register the MAC frame header cache callback BEFORE enabling CSI so
+    // the first CSI callback already has header data available.
+    frame_header_init();
+
     ESP_ERROR_CHECK(esp_wifi_set_csi(1));
 
     // @See: https://github.com/espressif/esp-idf/blob/master/components/esp_wifi/include/esp_wifi_types.h#L401

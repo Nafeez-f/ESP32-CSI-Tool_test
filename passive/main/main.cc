@@ -12,6 +12,7 @@
 
 #include "../../_components/nvs_component.h"
 #include "../../_components/sd_component.h"
+#include "../../_components/frame_header_component.h"
 #include "../../_components/csi_component.h"
 #include "../../_components/time_component.h"
 #include "../../_components/input_component.h"
