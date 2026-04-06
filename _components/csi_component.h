@@ -18,14 +18,45 @@ char *project_type;
 
 SemaphoreHandle_t mutex = xSemaphoreCreateMutex();
 
-// ---- ISAC: runtime activity label ----------------------------------------
-// Set via serial command "TAG: <label>" (max 31 chars). Empty = unlabelled.
-static char isac_activity_label[32] = {0};
+// ---- ISAC: physical environment label ------------------------------------
+// Optionally set via serial command "TAG: <label>" (max 31 chars).
+// This labels the PHYSICAL ENVIRONMENT, not the traffic type.
+// Examples: "person_present", "empty_room", "walking", "sitting"
+// Traffic type (YouTube vs idle vs browsing) is derived automatically from
+// frame metadata — no human intervention needed. See comm_class below.
+static char isac_env_label[32] = {0};
 
 void isac_set_activity_label(const char *label) {
-    strncpy(isac_activity_label, label, sizeof(isac_activity_label) - 1);
-    isac_activity_label[sizeof(isac_activity_label) - 1] = '\0';
-    printf("ISAC activity label set to: '%s'\n", isac_activity_label);
+    strncpy(isac_env_label, label, sizeof(isac_env_label) - 1);
+    isac_env_label[sizeof(isac_env_label) - 1] = '\0';
+    printf("Environment label set to: '%s'\n", isac_env_label);
+}
+
+// ---- ISAC: automatic communication class ---------------------------------
+// Derived entirely from frame metadata — no commands needed.
+// This is the "C" in ISAC: what type of communication is happening RIGHT NOW,
+// read directly from the 802.11 frame that produced this CSI sample.
+//
+// Rules (applied in priority order):
+//   "video"      — QoS TID 4 or 5  (Video access category)
+//                  OR sig_len > 800 bytes with TID unknown
+//                  YouTube, Netflix, video calls all use this.
+//   "voice"      — QoS TID 6 or 7  (Voice access category)
+//                  VoIP, FaceTime audio
+//   "background" — QoS TID 1 or 2  (Background: cloud sync, OS updates)
+//   "browsing"   — QoS TID 0 or 3 with sig_len > 200 bytes
+//                  (Best Effort with meaningful payload = web page loading)
+//   "idle"       — sig_len <= 100 bytes (only ACKs, keepalives, beacons)
+//                  No real application data flowing.
+//   "data"       — everything else (unclassified Best Effort)
+static const char* _comm_class(int tid, int sig_len) {
+    if (tid == 6 || tid == 7)                          return "voice";
+    if (tid == 4 || tid == 5)                          return "video";
+    if (tid == 1 || tid == 2)                          return "background";
+    if (sig_len > 800)                                 return "video";   // large frame, unknown TID
+    if ((tid == 0 || tid == 3) && sig_len > 200)       return "browsing";
+    if (sig_len <= 100)                                return "idle";
+    return "data";
 }
 
 // ---- ISAC: MAC address filter helpers ------------------------------------
@@ -83,18 +114,14 @@ void _wifi_csi_cb(void *ctx, wifi_csi_info_t *data) {
     // Drop frames from MACs we are not interested in (ISAC filter)
     if (!_mac_is_watched(d.mac)) return;
 
-    // Drop samples where the ESP32 hardware flagged the first 4 CSI bytes as
-    // invalid.  These produce garbage amplitude values and corrupt any
-    // time-series analysis that expects clean complex coefficients.
-    if (d.first_word_invalid) return;
-
     xSemaphoreTake(mutex, portMAX_DELAY);
     std::stringstream ss;
 
     char mac[20] = {0};
     sprintf(mac, "%02X:%02X:%02X:%02X:%02X:%02X", d.mac[0], d.mac[1], d.mac[2], d.mac[3], d.mac[4], d.mac[5]);
 
-    // Fetch 802.11 MAC header fields cached by the promiscuous RX callback
+    // Fetch 802.11 MAC header fields cached by the promiscuous RX callback.
+    // -1 means the cache hasn't seen this MAC yet (first few frames only).
     const mac_frame_cache_t *fh = frame_header_get(d.mac);
     int  fh_retry    = fh ? fh->retry    : -1;
     int  fh_seq_num  = fh ? fh->seq_num  : -1;
@@ -103,6 +130,11 @@ void _wifi_csi_cb(void *ctx, wifi_csi_info_t *data) {
     int  fh_tid      = fh ? fh->tid      : -1;
     int  fh_is_qos   = fh ? fh->is_qos   : -1;
     int  fh_duration = fh ? fh->duration : -1;
+
+    // Automatic communication class — derived from frame metadata, no human
+    // input needed. This is what type of application traffic produced this
+    // CSI sample: "video", "voice", "browsing", "background", "idle", "data".
+    const char *comm_class = _comm_class(fh_tid, d.rx_ctrl.sig_len);
 
     ss << "CSI_DATA,"
        << project_type << ","
@@ -130,17 +162,20 @@ void _wifi_csi_cb(void *ctx, wifi_csi_info_t *data) {
        << real_time_set << ","
        << get_steady_clock_timestamp() << ","
        << data->len << ","
-       // 802.11 MAC header fields (from frame_header_component.h)
-       // -1 means the promiscuous cache has not seen this MAC yet
-       << fh_seq_num  << ","   // 802.11 sequence number (gap = lost frame = missing CSI)
-       << fh_retry    << ","   // retransmission: 1=bad channel/congestion
-       << fh_to_ds    << ","   // 1=uplink (MacBook→router)
-       << fh_from_ds  << ","   // 1=downlink (router→MacBook)
-       << fh_tid      << ","   // QoS TID: 4/5=Video, 0/3=BestEffort, 1/2=Background, 6/7=Voice
-       << fh_is_qos   << ","   // 1=QoS data frame (HT/VHT traffic), 0=legacy
-       << fh_duration << ","   // NAV in µs: channel reservation duration
-       // ISAC: activity label for this sample (empty string if unlabelled)
-       << isac_activity_label << ",[";
+       // 802.11 MAC header fields (-1 = cache miss on very first frames)
+       << fh_seq_num  << ","   // sequence number (gap = lost frame)
+       << fh_retry    << ","   // 1=retransmission
+       << fh_to_ds    << ","   // 1=uplink (device→router)
+       << fh_from_ds  << ","   // 1=downlink (router→device)
+       << fh_tid      << ","   // QoS TID: 4/5=Video, 0/3=BestEffort, 6/7=Voice
+       << fh_is_qos   << ","   // 1=QoS data frame
+       << fh_duration << ","   // NAV channel reservation (µs)
+       // AUTO: communication class derived from metadata — no commands needed
+       << comm_class << ","
+       // OPTIONAL: physical environment label set by TAG: command
+       // Use this for: "person_present", "empty_room", "walking", etc.
+       // Leave it empty if you only care about comm_class
+       << isac_env_label << ",[";
 
 #if CONFIG_SHOULD_COLLECT_ONLY_LLTF
     int data_len = 128;
@@ -176,7 +211,11 @@ int8_t *my_ptr;
 }
 
 void _print_csi_csv_header() {
-    char *header_str = (char *) "type,role,mac,rssi,rate,sig_mode,mcs,bandwidth,smoothing,not_sounding,aggregation,stbc,fec_coding,sgi,noise_floor,ampdu_cnt,channel,secondary_channel,local_timestamp,ant,sig_len,rx_state,real_time_set,real_timestamp,len,seq_num,retry,to_ds,from_ds,tid,is_qos,duration,activity,CSI_DATA\n";
+    // comm_class: automatic traffic classification from frame metadata (no commands needed)
+    //   video / voice / browsing / background / idle / data
+    // env_label: optional physical environment label set by TAG: command
+    //   e.g. person_present / empty_room / walking — empty string if unused
+    char *header_str = (char *) "type,role,mac,rssi,rate,sig_mode,mcs,bandwidth,smoothing,not_sounding,aggregation,stbc,fec_coding,sgi,noise_floor,ampdu_cnt,channel,secondary_channel,local_timestamp,ant,sig_len,rx_state,real_time_set,real_timestamp,len,seq_num,retry,to_ds,from_ds,tid,is_qos,duration,comm_class,env_label,CSI_DATA\n";
     outprintf(header_str);
 }
 
