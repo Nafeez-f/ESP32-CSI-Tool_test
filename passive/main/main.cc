@@ -77,7 +77,13 @@ void config_print() {
 #ifdef CONFIG_ISAC_WATCH_MAC_4
     if (strlen(CONFIG_ISAC_WATCH_MAC_4) > 0) printf("    MAC_4: %s\n", CONFIG_ISAC_WATCH_MAC_4);
 #endif
-    printf("  Runtime commands: TAG: <label> | WATCHMAC: <mac> | CLEARMAC\n");
+    printf("  Runtime commands:\n");
+    printf("    SCAN              - find your router's channel automatically\n");
+    printf("    CHANNEL: <n>      - switch to channel n (1-13) without reflashing\n");
+    printf("    WATCHMAC: <mac>   - filter CSI to this MAC (e.g. your router BSSID)\n");
+    printf("    CLEARMAC          - remove all MAC filters\n");
+    printf("    TAG: <label>      - label subsequent CSI rows\n");
+    printf("    SETTIME: <unix>   - set real-time clock\n");
     printf("-----------------------\n");
     printf("\n\n\n\n\n\n\n\n");
 }
