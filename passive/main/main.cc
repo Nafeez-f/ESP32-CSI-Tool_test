@@ -94,8 +94,15 @@ void passive_init() {
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_NULL));
     ESP_ERROR_CHECK(esp_wifi_start());
 
+    // WIFI_PROMIS_FILTER_MASK_DATA alone only passes legacy single-MPDU frames.
+    // 802.11n/ac traffic (YouTube, any HT/VHT data) is sent as A-MPDU aggregated
+    // frames. Without DATA_MPDU and DATA_AMPDU in the mask those frames are
+    // silently dropped before the promiscuous callback fires, which is why all
+    // captured frames show sig_mode=0 and the hotspot MAC never appears.
     const wifi_promiscuous_filter_t filt = {
-            .filter_mask = WIFI_PROMIS_FILTER_MASK_DATA
+            .filter_mask = WIFI_PROMIS_FILTER_MASK_DATA |
+                           WIFI_PROMIS_FILTER_MASK_DATA_MPDU |
+                           WIFI_PROMIS_FILTER_MASK_DATA_AMPDU
     };
 
     int curChannel = WIFI_CHANNEL;
