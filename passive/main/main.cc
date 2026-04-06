@@ -80,6 +80,8 @@ void config_print() {
     printf("  Runtime commands:\n");
     printf("    SCAN              - find your router's channel automatically\n");
     printf("    CHANNEL: <n>      - switch to channel n (1-13) without reflashing\n");
+    printf("    BANDWIDTH: <mode> - 20 | 40above | 40below (default: 40above)\n");
+    printf("                        use 40above/40below if hotspot MAC is missing\n");
     printf("    WATCHMAC: <mac>   - filter CSI to this MAC (e.g. your router BSSID)\n");
     printf("    CLEARMAC          - remove all MAC filters\n");
     printf("    TAG: <label>      - label subsequent CSI rows\n");
@@ -109,7 +111,14 @@ void passive_init() {
 
     esp_wifi_set_promiscuous(true);
     esp_wifi_set_promiscuous_filter(&filt);
-    esp_wifi_set_channel(curChannel, WIFI_SECOND_CHAN_NONE);
+    // WIFI_SECOND_CHAN_NONE (HT20) misses 802.11n HT40 frames from modern APs/hotspots.
+    // iPhone hotspot and most 802.11n APs negotiate HT40 with capable clients.
+    // HT40 data frames span the primary + secondary channel simultaneously.
+    // Use WIFI_SECOND_CHAN_ABOVE to capture 40MHz frames where secondary is above
+    // the primary (e.g. primary=ch6, secondary=ch10 — the most common arrangement).
+    // If the hotspot MAC still does not appear, try WIFI_SECOND_CHAN_BELOW instead,
+    // or use the runtime CHANNEL: command to switch and observe.
+    esp_wifi_set_channel(curChannel, WIFI_SECOND_CHAN_ABOVE);
 }
 
 extern "C" void app_main(void) {

@@ -98,6 +98,31 @@ void _handle_input() {
         int ch = atoi(rest);
         _set_channel(ch);
 
+    } else if (_starts_with(input_buffer, "BANDWIDTH: ", &rest)) {
+        // BANDWIDTH: 20      — HT20, no secondary channel (misses HT40 AP frames)
+        // BANDWIDTH: 40above — HT40, secondary channel above primary (e.g. ch6+ch10)
+        // BANDWIDTH: 40below — HT40, secondary channel below primary (e.g. ch6+ch2)
+        // Use this to find which mode your AP/hotspot uses if hotspot MAC is missing.
+        uint8_t primary;
+        wifi_second_chan_t second;
+        esp_wifi_get_channel(&primary, &second);
+        wifi_second_chan_t new_second;
+        if (strcmp(rest, "20") == 0) {
+            new_second = WIFI_SECOND_CHAN_NONE;
+        } else if (strcmp(rest, "40above") == 0) {
+            new_second = WIFI_SECOND_CHAN_ABOVE;
+        } else if (strcmp(rest, "40below") == 0) {
+            new_second = WIFI_SECOND_CHAN_BELOW;
+        } else {
+            printf("BANDWIDTH: unknown value '%s'. Use: 20 | 40above | 40below\n", rest);
+            goto done;
+        }
+        esp_wifi_set_channel(primary, new_second);
+        printf("BANDWIDTH: channel %d, secondary=%s\n", primary,
+               new_second==WIFI_SECOND_CHAN_NONE?"none":
+               new_second==WIFI_SECOND_CHAN_ABOVE?"above":"below");
+        done:;
+
     } else if (strcmp(input_buffer, "SCAN") == 0) {
         // SCAN  — cycle channels 1-13, 2s each, print frame counts.
         // Use this to discover your router's channel automatically.
