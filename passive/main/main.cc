@@ -47,6 +47,36 @@
 #define SEND_CSI_TO_SD 0
 #endif
 
+#ifdef CONFIG_ISAC_WIFI_SSID
+#define ISAC_WIFI_SSID CONFIG_ISAC_WIFI_SSID
+#else
+#define ISAC_WIFI_SSID ""
+#endif
+
+#ifdef CONFIG_ISAC_WIFI_PASSWORD
+#define ISAC_WIFI_PASSWORD CONFIG_ISAC_WIFI_PASSWORD
+#else
+#define ISAC_WIFI_PASSWORD ""
+#endif
+
+static EventGroupHandle_t s_wifi_event_group;
+static const int WIFI_CONNECTED_BIT = BIT0;
+
+static void _wifi_event_handler(void *arg, esp_event_base_t event_base,
+                                int32_t event_id, void *event_data) {
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        esp_wifi_connect();
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        printf("ISAC: WiFi disconnected, reconnecting...\n");
+        esp_wifi_connect();
+        xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+        printf("ISAC: Connected! IP=" IPSTR "\n", IP2STR(&event->ip_info.ip));
+        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+    }
+}
+
 void config_print() {
     printf("\n\n\n\n\n\n\n\n");
     printf("-----------------------\n");
@@ -64,6 +94,13 @@ void config_print() {
     printf("SEND_CSI_TO_SD: %d\n", SEND_CSI_TO_SD);
     printf("-----------------------\n");
     printf("ISAC MODE\n");
+    if (strlen(ISAC_WIFI_SSID) > 0) {
+        printf("  STA+Promiscuous: joining '%s' for HT capability\n", ISAC_WIFI_SSID);
+    } else {
+        printf("  Pure promiscuous (WIFI_MODE_NULL)\n");
+        printf("  WARNING: HT/VHT frames will NOT produce CSI!\n");
+        printf("  Set SSID/password in menuconfig for full ISAC capture.\n");
+    }
     printf("  Compile-time MAC filter:\n");
 #ifdef CONFIG_ISAC_WATCH_MAC_1
     if (strlen(CONFIG_ISAC_WATCH_MAC_1) > 0) printf("    MAC_1: %s\n", CONFIG_ISAC_WATCH_MAC_1);
@@ -77,37 +114,11 @@ void config_print() {
 #ifdef CONFIG_ISAC_WATCH_MAC_4
     if (strlen(CONFIG_ISAC_WATCH_MAC_4) > 0) printf("    MAC_4: %s\n", CONFIG_ISAC_WATCH_MAC_4);
 #endif
-    printf("  Management frames (beacons, probes) are INCLUDED and labelled mgmt.\n");
-    printf("  This gives continuous CSI even when no data is flowing.\n");
-    printf("  Use HIDEMGMT to suppress them if output is too fast.\n");
-    printf("\n");
-    printf("  Runtime commands:\n");
-    printf("    SCAN              - find your router's channel automatically\n");
-    printf("    CHANNEL: <n>      - switch to channel n (1-13) without reflashing\n");
-    printf("    BANDWIDTH: <mode> - 20 | 40above | 40below (default: 40above)\n");
-    printf("                        use 40above/40below if hotspot MAC is missing\n");
-    printf("    WATCHMAC: <mac>   - filter CSI to this MAC (e.g. your router BSSID)\n");
-    printf("    CLEARMAC          - remove all MAC filters\n");
-    printf("    TAG: <label>      - label subsequent CSI rows\n");
-    printf("    SETTIME: <unix>   - set real-time clock\n");
-    printf("    SHOWMGMT          - include management frame CSI (default)\n");
-    printf("    HIDEMGMT          - suppress management frame CSI\n");
-    printf("    LISTMACS          - show all MACs seen so far with frame counts\n");
     printf("-----------------------\n");
     printf("\n\n\n\n\n\n\n\n");
 }
 
 void passive_init() {
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_NULL));
-    ESP_ERROR_CHECK(esp_wifi_start());
-
-    // Include MGMT frames in the promiscuous filter so the frame-header
-    // callback can identify them.  The CSI callback then classifies them as
-    // "mgmt" and suppresses them by default (SHOWMGMT to re-enable).
-    // DATA_MPDU and DATA_AMPDU are needed for 802.11n/ac aggregated traffic
-    // (YouTube, video calls, etc.).
     const wifi_promiscuous_filter_t filt = {
             .filter_mask = WIFI_PROMIS_FILTER_MASK_DATA |
                            WIFI_PROMIS_FILTER_MASK_DATA_MPDU |
@@ -115,18 +126,57 @@ void passive_init() {
                            WIFI_PROMIS_FILTER_MASK_MGMT
     };
 
-    int curChannel = WIFI_CHANNEL;
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
-    esp_wifi_set_promiscuous(true);
-    esp_wifi_set_promiscuous_filter(&filt);
-    // WIFI_SECOND_CHAN_NONE (HT20) misses 802.11n HT40 frames from modern APs/hotspots.
-    // iPhone hotspot and most 802.11n APs negotiate HT40 with capable clients.
-    // HT40 data frames span the primary + secondary channel simultaneously.
-    // Use WIFI_SECOND_CHAN_ABOVE to capture 40MHz frames where secondary is above
-    // the primary (e.g. primary=ch6, secondary=ch10 — the most common arrangement).
-    // If the hotspot MAC still does not appear, try WIFI_SECOND_CHAN_BELOW instead,
-    // or use the runtime CHANNEL: command to switch and observe.
-    esp_wifi_set_channel(curChannel, WIFI_SECOND_CHAN_ABOVE);
+    if (strlen(ISAC_WIFI_SSID) > 0) {
+        // STA + promiscuous: connect to the network so the radio negotiates
+        // HT capabilities. Promiscuous mode on top captures CSI from ALL
+        // frames on the channel — including those between other devices
+        // (MacBook <-> router). This is the only way to get CSI from HT/VHT
+        // frames in passive/ISAC mode.
+        s_wifi_event_group = xEventGroupCreate();
+
+        ESP_ERROR_CHECK(esp_netif_init());
+        ESP_ERROR_CHECK(esp_event_loop_create_default());
+        esp_netif_create_default_wifi_sta();
+
+        esp_event_handler_instance_t inst_any, inst_ip;
+        ESP_ERROR_CHECK(esp_event_handler_instance_register(
+            WIFI_EVENT, ESP_EVENT_ANY_ID, &_wifi_event_handler, NULL, &inst_any));
+        ESP_ERROR_CHECK(esp_event_handler_instance_register(
+            IP_EVENT, IP_EVENT_STA_GOT_IP, &_wifi_event_handler, NULL, &inst_ip));
+
+        wifi_config_t wifi_config = {};
+        strlcpy((char *)wifi_config.sta.ssid, ISAC_WIFI_SSID, sizeof(wifi_config.sta.ssid));
+        strlcpy((char *)wifi_config.sta.password, ISAC_WIFI_PASSWORD, sizeof(wifi_config.sta.password));
+        wifi_config.sta.channel = WIFI_CHANNEL;
+
+        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+        ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+        ESP_ERROR_CHECK(esp_wifi_start());
+        esp_wifi_set_ps(WIFI_PS_NONE);
+
+        printf("ISAC: Connecting to '%s' on channel %d...\n", ISAC_WIFI_SSID, WIFI_CHANNEL);
+        xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT,
+                            pdFALSE, pdFALSE, 10000 / portTICK_PERIOD_MS);
+
+        esp_wifi_set_promiscuous(true);
+        esp_wifi_set_promiscuous_filter(&filt);
+
+        printf("ISAC: STA+Promiscuous active. CSI from ALL frames on channel.\n");
+    } else {
+        // Pure promiscuous (original behaviour). Only legacy frames produce CSI.
+        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_NULL));
+        ESP_ERROR_CHECK(esp_wifi_start());
+
+        esp_wifi_set_promiscuous(true);
+        esp_wifi_set_promiscuous_filter(&filt);
+        esp_wifi_set_channel(WIFI_CHANNEL, WIFI_SECOND_CHAN_ABOVE);
+
+        printf("ISAC: Pure promiscuous on channel %d (no STA — HT frames won't produce CSI)\n",
+               WIFI_CHANNEL);
+    }
 }
 
 extern "C" void app_main(void) {
@@ -135,17 +185,5 @@ extern "C" void app_main(void) {
     sd_init();
     passive_init();
     csi_init((char *) "PASSIVE");
-
-#ifdef CONFIG_ISAC_AUTO_SCAN
-    {
-        int dwell = 500;
-#ifdef CONFIG_ISAC_AUTO_SCAN_DWELL_MS
-        dwell = CONFIG_ISAC_AUTO_SCAN_DWELL_MS;
-#endif
-        printf("\n=== AUTO-SCAN: finding best bandwidth for channel %d ===\n", WIFI_CHANNEL);
-        _do_bandwidth_scan(WIFI_CHANNEL, dwell);
-    }
-#endif
-
     input_loop();
 }

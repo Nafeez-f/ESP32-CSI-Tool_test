@@ -45,26 +45,24 @@ menu "ESP32 CSI Tool Config"
             If your ESP32 does not have an SD card, there is no reason to use this feature.
             If you do though, the program will be recognize this and not attempt writing to the SD card.
 
-    config ISAC_AUTO_SCAN
-        bool "Auto-test bandwidth (HT20/HT40) at boot"
-        default "y"
+    config ISAC_WIFI_SSID
+        string "WiFi SSID to join (for HT/VHT CSI capture)"
+        default ""
         help
-            On startup, test HT20/HT40-above/HT40-below on the configured WiFi
-            Channel and pick the mode with the most frames. Does NOT change the
-            channel — only the bandwidth mode.
-            This is needed because routers use either HT40-above or HT40-below
-            and picking the wrong one means missing all HT data frames.
-            After the test, prints a LISTMACS table.
-            Disable this if you already know the correct bandwidth mode.
+            Set this to your router's SSID. The ESP32 will connect as a STA
+            and enable promiscuous mode on top. This is REQUIRED to capture
+            CSI from HT/VHT (802.11n/ac) frames — which is all modern traffic
+            including YouTube, browsing, etc.
+            Without this, pure promiscuous mode (WIFI_MODE_NULL) can only
+            produce CSI from legacy-rate frames (beacons, keepalives).
+            Leave empty to use pure promiscuous mode (legacy frames only).
 
-    config ISAC_AUTO_SCAN_DWELL_MS
-        depends on ISAC_AUTO_SCAN
-        int "Dwell time per mode during auto-scan (ms)"
-        default 500
+    config ISAC_WIFI_PASSWORD
+        depends on ISAC_WIFI_SSID != ""
+        string "WiFi password"
+        default ""
         help
-            How long to listen on each channel+bandwidth combination during
-            the boot scan. Lower = faster boot but less accurate. 500ms is
-            a good balance.
+            Password for the WiFi network. Leave empty for open networks.
 
     menu "ISAC MAC Filter (optional)"
         depends on SHOULD_COLLECT_CSI
