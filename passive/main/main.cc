@@ -77,6 +77,9 @@ void config_print() {
 #ifdef CONFIG_ISAC_WATCH_MAC_4
     if (strlen(CONFIG_ISAC_WATCH_MAC_4) > 0) printf("    MAC_4: %s\n", CONFIG_ISAC_WATCH_MAC_4);
 #endif
+    printf("  Management frames (beacons, probes) are SUPPRESSED by default.\n");
+    printf("  Only data frames appear — these carry the traffic you care about.\n");
+    printf("\n");
     printf("  Runtime commands:\n");
     printf("    SCAN              - find your router's channel automatically\n");
     printf("    CHANNEL: <n>      - switch to channel n (1-13) without reflashing\n");
@@ -86,6 +89,8 @@ void config_print() {
     printf("    CLEARMAC          - remove all MAC filters\n");
     printf("    TAG: <label>      - label subsequent CSI rows\n");
     printf("    SETTIME: <unix>   - set real-time clock\n");
+    printf("    SHOWMGMT          - include management frame CSI in output\n");
+    printf("    HIDEMGMT          - suppress management frame CSI (default)\n");
     printf("-----------------------\n");
     printf("\n\n\n\n\n\n\n\n");
 }
@@ -96,15 +101,16 @@ void passive_init() {
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_NULL));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    // WIFI_PROMIS_FILTER_MASK_DATA alone only passes legacy single-MPDU frames.
-    // 802.11n/ac traffic (YouTube, any HT/VHT data) is sent as A-MPDU aggregated
-    // frames. Without DATA_MPDU and DATA_AMPDU in the mask those frames are
-    // silently dropped before the promiscuous callback fires, which is why all
-    // captured frames show sig_mode=0 and the hotspot MAC never appears.
+    // Include MGMT frames in the promiscuous filter so the frame-header
+    // callback can identify them.  The CSI callback then classifies them as
+    // "mgmt" and suppresses them by default (SHOWMGMT to re-enable).
+    // DATA_MPDU and DATA_AMPDU are needed for 802.11n/ac aggregated traffic
+    // (YouTube, video calls, etc.).
     const wifi_promiscuous_filter_t filt = {
             .filter_mask = WIFI_PROMIS_FILTER_MASK_DATA |
                            WIFI_PROMIS_FILTER_MASK_DATA_MPDU |
-                           WIFI_PROMIS_FILTER_MASK_DATA_AMPDU
+                           WIFI_PROMIS_FILTER_MASK_DATA_AMPDU |
+                           WIFI_PROMIS_FILTER_MASK_MGMT
     };
 
     int curChannel = WIFI_CHANNEL;

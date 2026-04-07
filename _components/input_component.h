@@ -31,9 +31,15 @@ void _set_channel(int ch) {
         printf("CHANNEL: invalid value %d (must be 1-13 for 2.4 GHz)\n", ch);
         return;
     }
-    esp_err_t err = esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+    // Preserve the current HT40 secondary-channel setting when switching.
+    uint8_t cur_primary;
+    wifi_second_chan_t cur_second;
+    esp_wifi_get_channel(&cur_primary, &cur_second);
+    esp_err_t err = esp_wifi_set_channel(ch, cur_second);
     if (err == ESP_OK) {
-        printf("CHANNEL: now listening on channel %d\n", ch);
+        printf("CHANNEL: now listening on channel %d (secondary=%s)\n", ch,
+               cur_second==WIFI_SECOND_CHAN_NONE?"none":
+               cur_second==WIFI_SECOND_CHAN_ABOVE?"above":"below");
     } else {
         printf("CHANNEL: failed to set channel %d (err 0x%x)\n", ch, err);
     }
@@ -46,7 +52,11 @@ void _do_channel_scan() {
     printf("SCAN: the channel with the most frames is your router's channel.\n");
     printf("SCAN: (CSI rows are suppressed during scan)\n\n");
 
-    // Swap in the counting callback
+    // Remember current settings to restore after scan
+    uint8_t orig_primary;
+    wifi_second_chan_t orig_second;
+    esp_wifi_get_channel(&orig_primary, &orig_second);
+
     ESP_ERROR_CHECK(esp_wifi_set_csi_rx_cb(&_scan_csi_cb, NULL));
 
     int best_ch = 1, best_count = 0;
@@ -55,17 +65,20 @@ void _do_channel_scan() {
         esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
         vTaskDelay(2000 / portTICK_PERIOD_MS);
         int cnt = _scan_frame_count;
-        printf("SCAN: ch %2d  →  %3d frames/2s %s\n",
-               ch, cnt, cnt > best_count ? "  ← best so far" : "");
+        printf("SCAN: ch %2d  ->  %3d frames/2s %s\n",
+               ch, cnt, cnt > best_count ? "  <- best so far" : "");
         if (cnt > best_count) { best_count = cnt; best_ch = ch; }
     }
 
     printf("\nSCAN: done. Best channel: %d (%d frames)\n", best_ch, best_count);
     printf("SCAN: run  CHANNEL: %d  to lock onto it.\n\n", best_ch);
 
-    // Restore the real CSI callback and stay on the best channel
     ESP_ERROR_CHECK(esp_wifi_set_csi_rx_cb(&_wifi_csi_cb, NULL));
-    _set_channel(best_ch);
+    // Restore HT40 setting on the best channel
+    esp_wifi_set_channel(best_ch, orig_second);
+    printf("CHANNEL: now listening on channel %d (secondary=%s)\n", best_ch,
+           orig_second==WIFI_SECOND_CHAN_NONE?"none":
+           orig_second==WIFI_SECOND_CHAN_ABOVE?"above":"below");
 }
 
 // ---- Command dispatcher --------------------------------------------------
@@ -124,13 +137,19 @@ void _handle_input() {
         done:;
 
     } else if (strcmp(input_buffer, "SCAN") == 0) {
-        // SCAN  — cycle channels 1-13, 2s each, print frame counts.
-        // Use this to discover your router's channel automatically.
         _do_channel_scan();
+
+    } else if (strcmp(input_buffer, "SHOWMGMT") == 0) {
+        isac_show_mgmt = true;
+        printf("Management frame CSI now INCLUDED in output\n");
+
+    } else if (strcmp(input_buffer, "HIDEMGMT") == 0) {
+        isac_show_mgmt = false;
+        printf("Management frame CSI now SUPPRESSED (default)\n");
 
     } else {
         printf("Unknown command: '%s'\n", input_buffer);
-        printf("Commands: SETTIME | TAG | WATCHMAC | CLEARMAC | CHANNEL | SCAN\n");
+        printf("Commands: SETTIME | TAG | WATCHMAC | CLEARMAC | CHANNEL | BANDWIDTH | SCAN | SHOWMGMT | HIDEMGMT\n");
     }
 }
 

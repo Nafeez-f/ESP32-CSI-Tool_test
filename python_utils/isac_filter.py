@@ -14,11 +14,12 @@ comm_class is determined AUTOMATICALLY from frame metadata — no human commands
 needed.  Just collect data and run this script.  The ESP32 reads TID and
 sig_len from every frame header and classifies it on-device:
 
+  mgmt       — management frame (beacon, probe, etc.) — suppressed by default
   video      — TID 4/5 or sig_len > 800 bytes  (YouTube, Netflix, video calls)
   voice      — TID 6/7                          (VoIP, FaceTime audio)
   browsing   — TID 0/3 and sig_len > 200 bytes  (web pages loading)
   background — TID 1/2                          (cloud sync, OS updates)
-  idle       — sig_len <= 100 bytes             (only ACKs, no application data)
+  idle       — sig_len <= 100 bytes             (only keepalives, null data)
   data       — everything else
 
 env_label is OPTIONAL and set via the TAG: serial command.  Use it only when
@@ -97,7 +98,7 @@ COL_COMM_CLASS = 32   # automatic, from firmware
 COL_ENV_LABEL  = 33   # optional, from TAG: command
 COL_CSI        = 34
 
-COMM_CLASS_ORDER = ["video", "voice", "browsing", "data", "background", "idle"]
+COMM_CLASS_ORDER = ["video", "voice", "browsing", "data", "background", "idle", "mgmt"]
 
 
 # ---- CLI -------------------------------------------------------------------
@@ -355,7 +356,6 @@ def plot_isac_analysis(rows, window_sec=1.0):
     mean_amps = np.array([sum(r["amplitudes"]) / len(r["amplitudes"]) for r in rows])
     classes  = [r["comm_class"] for r in rows]
 
-    # Colour map per comm_class
     cls_colors = {
         "video":      "#e74c3c",
         "voice":      "#9b59b6",
@@ -363,6 +363,7 @@ def plot_isac_analysis(rows, window_sec=1.0):
         "data":       "#1abc9c",
         "background": "#f39c12",
         "idle":       "#95a5a6",
+        "mgmt":       "#bdc3c7",
     }
 
     max_t = float(ts[-1])
@@ -485,7 +486,8 @@ def plot_csi_timeline(rows):
     classes = [r["comm_class"] for r in rows]
 
     cls_colors = {"video":"#e74c3c","voice":"#9b59b6","browsing":"#3498db",
-                  "data":"#1abc9c","background":"#f39c12","idle":"#95a5a6"}
+                  "data":"#1abc9c","background":"#f39c12","idle":"#95a5a6",
+                  "mgmt":"#bdc3c7"}
 
     fig, axes = plt.subplots(2, 1, figsize=(14, 8),
                              gridspec_kw={"height_ratios": [4, 1]})
@@ -530,7 +532,8 @@ def plot_mean_spectrum(rows_by_class, subcarrier=None):
         sys.exit(1)
 
     cls_colors = {"video":"#e74c3c","voice":"#9b59b6","browsing":"#3498db",
-                  "data":"#1abc9c","background":"#f39c12","idle":"#95a5a6"}
+                  "data":"#1abc9c","background":"#f39c12","idle":"#95a5a6",
+                  "mgmt":"#bdc3c7"}
 
     if subcarrier is not None:
         fig, ax = plt.subplots(figsize=(12, 4))

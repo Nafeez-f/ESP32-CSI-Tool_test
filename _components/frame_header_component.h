@@ -103,6 +103,32 @@ typedef struct {
 static mac_frame_cache_t _mac_frame_cache[MAC_CACHE_SIZE];
 static int _mac_frame_cache_count = 0;
 
+// ---- Single-frame context for CSI callback correlation ---------------------
+// The promiscuous RX callback runs BEFORE the CSI callback for every received
+// frame (both execute in the Wi-Fi driver task, sequentially).  This struct
+// passes the 802.11 frame type so the CSI callback can distinguish data from
+// management frames — critical for ISAC because beacons generate valid CSI but
+// carry no application data and would otherwise flood the output.
+
+typedef struct {
+    uint8_t  mac[6];
+    wifi_promiscuous_pkt_type_t pkt_type;  // WIFI_PKT_MGMT, WIFI_PKT_DATA, …
+    bool     fresh;   // set by promisc CB, cleared when consumed by CSI CB
+} _frame_ctx_t;
+
+static _frame_ctx_t _last_frame_ctx = {{0}, (wifi_promiscuous_pkt_type_t)0, false};
+
+// Called by CSI callback.  Returns the wifi_promiscuous_pkt_type_t if the
+// promiscuous callback just processed a frame from this MAC.
+// Returns -1 if no correlation is available (frame type not in filter).
+static int frame_header_consume_pkt_type(const uint8_t mac[6]) {
+    if (_last_frame_ctx.fresh && memcmp(_last_frame_ctx.mac, mac, 6) == 0) {
+        _last_frame_ctx.fresh = false;
+        return (int)_last_frame_ctx.pkt_type;
+    }
+    return -1;
+}
+
 static mac_frame_cache_t* _cache_find_or_create(const uint8_t mac[6]) {
     for (int i = 0; i < _mac_frame_cache_count; i++) {
         if (memcmp(_mac_frame_cache[i].mac, mac, 6) == 0)
@@ -136,18 +162,21 @@ const mac_frame_cache_t* frame_header_get(const uint8_t mac[6]) {
 // ---- Promiscuous RX callback ----------------------------------------------
 
 static void _frame_header_promiscuous_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
-    if (type != WIFI_PKT_DATA) return;
-
     const wifi_promiscuous_pkt_t *pkt = (const wifi_promiscuous_pkt_t *) buf;
     const uint8_t *payload = pkt->payload;
     uint16_t pkt_len = pkt->rx_ctrl.sig_len;
 
-    // Need at least 24 bytes for the basic 802.11 MAC header
     if (pkt_len < 24) return;
 
     const ieee80211_mac_hdr_t *hdr = (const ieee80211_mac_hdr_t *) payload;
     uint16_t fc = hdr->frame_ctrl;
 
+    // Record frame type + sender MAC so the CSI callback can correlate.
+    memcpy(_last_frame_ctx.mac, hdr->addr2, 6);
+    _last_frame_ctx.pkt_type = type;
+    _last_frame_ctx.fresh    = true;
+
+    // Only fill the per-MAC detail cache for DATA frames.
     if (FC_TYPE(fc) != FC_TYPE_DATA) return;
 
     uint8_t subtype = FC_SUBTYPE(fc);

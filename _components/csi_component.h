@@ -32,28 +32,33 @@ void isac_set_activity_label(const char *label) {
     printf("Environment label set to: '%s'\n", isac_env_label);
 }
 
+// ---- ISAC: management-frame suppression -----------------------------------
+// Beacons, probe req/resp fire the CSI callback every ~100ms per AP on the
+// channel.  They overwhelm the output with "idle"-looking rows and hide the
+// real communication CSI you want for ISAC.
+// Default: suppressed.  Send "SHOWMGMT" / "HIDEMGMT" via serial to toggle.
+static bool isac_show_mgmt = false;
+
 // ---- ISAC: automatic communication class ---------------------------------
-// Derived entirely from frame metadata — no commands needed.
-// This is the "C" in ISAC: what type of communication is happening RIGHT NOW,
-// read directly from the 802.11 frame that produced this CSI sample.
+// pkt_type: from frame_header_consume_pkt_type() (-1 = unknown)
+// tid:      QoS TID from frame-header cache (-1 = cache miss)
+// sig_len:  from rx_ctrl
 //
 // Rules (applied in priority order):
+//   "mgmt"       — management frame (beacon, probe, etc.)
 //   "video"      — QoS TID 4 or 5  (Video access category)
 //                  OR sig_len > 800 bytes with TID unknown
-//                  YouTube, Netflix, video calls all use this.
 //   "voice"      — QoS TID 6 or 7  (Voice access category)
-//                  VoIP, FaceTime audio
 //   "background" — QoS TID 1 or 2  (Background: cloud sync, OS updates)
 //   "browsing"   — QoS TID 0 or 3 with sig_len > 200 bytes
-//                  (Best Effort with meaningful payload = web page loading)
-//   "idle"       — sig_len <= 100 bytes (only ACKs, keepalives, beacons)
-//                  No real application data flowing.
+//   "idle"       — sig_len <= 100 bytes (only keepalives, null data)
 //   "data"       — everything else (unclassified Best Effort)
-static const char* _comm_class(int tid, int sig_len) {
+static const char* _comm_class(int pkt_type, int tid, int sig_len) {
+    if (pkt_type == WIFI_PKT_MGMT)                    return "mgmt";
     if (tid == 6 || tid == 7)                          return "voice";
     if (tid == 4 || tid == 5)                          return "video";
     if (tid == 1 || tid == 2)                          return "background";
-    if (sig_len > 800)                                 return "video";   // large frame, unknown TID
+    if (sig_len > 800)                                 return "video";
     if ((tid == 0 || tid == 3) && sig_len > 200)       return "browsing";
     if (sig_len <= 100)                                return "idle";
     return "data";
@@ -114,14 +119,20 @@ void _wifi_csi_cb(void *ctx, wifi_csi_info_t *data) {
     // Drop frames from MACs we are not interested in (ISAC filter)
     if (!_mac_is_watched(d.mac)) return;
 
+    // Correlate with the promiscuous callback to get frame type.
+    int pkt_type = frame_header_consume_pkt_type(d.mac);
+
+    // Suppress management frames by default (beacons, probes, etc.).
+    // They generate CSI but carry no application data — they overwhelm the
+    // output and mask the communication CSI you actually want for ISAC.
+    if (!isac_show_mgmt && pkt_type == WIFI_PKT_MGMT) return;
+
     xSemaphoreTake(mutex, portMAX_DELAY);
     std::stringstream ss;
 
     char mac[20] = {0};
     sprintf(mac, "%02X:%02X:%02X:%02X:%02X:%02X", d.mac[0], d.mac[1], d.mac[2], d.mac[3], d.mac[4], d.mac[5]);
 
-    // Fetch 802.11 MAC header fields cached by the promiscuous RX callback.
-    // -1 means the cache hasn't seen this MAC yet (first few frames only).
     const mac_frame_cache_t *fh = frame_header_get(d.mac);
     int  fh_retry    = fh ? fh->retry    : -1;
     int  fh_seq_num  = fh ? fh->seq_num  : -1;
@@ -131,10 +142,7 @@ void _wifi_csi_cb(void *ctx, wifi_csi_info_t *data) {
     int  fh_is_qos   = fh ? fh->is_qos   : -1;
     int  fh_duration = fh ? fh->duration : -1;
 
-    // Automatic communication class — derived from frame metadata, no human
-    // input needed. This is what type of application traffic produced this
-    // CSI sample: "video", "voice", "browsing", "background", "idle", "data".
-    const char *comm_class = _comm_class(fh_tid, d.rx_ctrl.sig_len);
+    const char *comm_class = _comm_class(pkt_type, fh_tid, d.rx_ctrl.sig_len);
 
     ss << "CSI_DATA,"
        << project_type << ","

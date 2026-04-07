@@ -9,7 +9,7 @@ The following projects can be found in this repository:
 
 * `./active_sta` - *Active CSI collection (Station)* - Connects to some Access Point (AP) (Router or another ESP32) and sends packet requests (thus receiving CSI packet responses). 
 * `./active_ap` - *Active CSI collection (AP)* - AP which can be connected to by devices (ESP32, see previous).
-* `./passive` - *Passive CSI collection* - Passively listens for CSI frames on a given channel (default: channel 3).
+* `./passive` - *Passive CSI collection (ISAC)* - Passively sniffs data frames on a given channel (default: channel 6). Automatically classifies traffic (video/browsing/idle/etc.) and suppresses management-frame noise. See `passive/README.md`.
 
 Each project automatically sends the collected CSI data to both serial port and SD card (if present). 
 These settings can be configured as described below. 
@@ -131,149 +131,41 @@ Currently this script only visualizes subcarrier #44. You can change this by edi
 
 ## ISAC — Integrated Sensing and Communication
 
-This section explains how to use the **passive** mode to distinguish CSI samples
-that were caused by real communication traffic (e.g. your PC streaming YouTube)
-from background noise or other senders on the same channel.
+The **passive** firmware lets you sniff communication traffic (YouTube,
+browsing, etc.) and extract CSI from the same frames — no network connection
+needed.  See [`passive/README.md`](passive/README.md) for a complete
+quick-start guide.
 
-### Why MAC-address filtering matters
+### Key features
 
-In promiscuous mode the ESP32 sees *every* 802.11 data frame on the channel.
-When your PC talks to a router the relevant frames come from exactly two MACs:
+- **Management-frame suppression** — Beacons and probes are filtered out by
+  default so only data-carrying frames appear in the output.
+- **Automatic traffic classification** — Each CSI row has a `comm_class` column
+  (`video` / `voice` / `browsing` / `background` / `idle` / `data` / `mgmt`)
+  derived from 802.11 QoS TID and frame size.  No manual labelling needed.
+- **MAC filtering** — Compile-time or runtime (`WATCHMAC:`) to isolate your
+  device pair.
+- **Runtime channel / bandwidth** — `SCAN`, `CHANNEL:`, `BANDWIDTH:` commands.
 
-| Direction | Sender MAC in CSI row |
-|-----------|----------------------|
-| PC → router (uplink) | your PC's Wi-Fi MAC |
-| router → PC (downlink) | your router's BSSID |
-
-Without a filter, CSI from neighbours, IoT devices, and management frames are
-all mixed in — making it impossible to isolate the communication you care about.
-
-### Step-by-step ISAC workflow
-
-#### 1. Find the MACs you want to watch
-
-On the **PC** you want to monitor:
-
-```bash
-# Linux / macOS
-ip link show          # look for the wlan interface, e.g. wlan0
-# or
-ifconfig
-
-# Windows
-ipconfig /all         # look for "Physical Address" under your Wi-Fi adapter
-```
-
-Find the router's BSSID:
-
-```bash
-# Linux
-iw dev wlan0 link     # "Connected to AA:BB:CC:..." is the BSSID
-
-# macOS
-/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport -I | grep BSSID
-
-# Windows
-netsh wlan show interfaces | findstr BSSID
-```
-
-Also check **which Wi-Fi channel** the router is using (you must tell the ESP32
-to listen on that channel):
-
-```bash
-# Linux
-iw dev wlan0 link | grep freq
-# or
-iwlist wlan0 channel
-
-# macOS / Windows — check router admin page or use a Wi-Fi scanner app
-```
-
-#### 2. Configure the passive firmware
-
-Open `idf.py menuconfig` inside the `./passive` directory.
-
-Under **ESP32 CSI Tool Config → ISAC MAC Filter** enter:
-
-- **Watched MAC #1** — your PC's Wi-Fi MAC (e.g. `AA:BB:CC:DD:EE:FF`)
-- **Watched MAC #2** — your router's BSSID (e.g. `11:22:33:44:55:66`)
-
-Also set **WiFi Channel** to match the channel your router is using.
-
-Leave MACs blank to collect from every sender (you can still filter at runtime
-or in post-processing).
-
-#### 3. Flash and start collecting
+### Quick example
 
 ```bash
 cd ./passive
 idf.py flash monitor | python ../python_utils/serial_append_time.py > experiment.csv
+# In another terminal or in the monitor, type:
+#   SCAN                    ← find your hotspot channel
+#   CHANNEL: 6              ← switch to it
+#   WATCHMAC: AA:BB:CC:DD:EE:FF  ← your router/hotspot BSSID
+# Then play YouTube on the laptop and watch comm_class change to "video".
 ```
 
-#### 4. Label activities at runtime
-
-While the ESP32 is running and `idf.py monitor` is open, type commands directly
-into the monitor terminal:
-
-```
-# Mark the start of a YouTube session
-TAG: youtube
-
-# Mark the start of an idle (no traffic) period
-TAG: idle
-
-# Add a MAC to the watch list without reflashing
-WATCHMAC: AA:BB:CC:DD:EE:FF
-
-# Remove all MAC filters (go back to seeing everything)
-CLEARMAC
-```
-
-The `activity` column in the CSV will contain the label that was active when
-each CSI sample was captured.  An empty label means the sample was unlabelled.
-
-#### 5. Post-process with `isac_filter.py`
+### Post-processing
 
 ```bash
-# Print per-activity amplitude statistics:
-python python_utils/isac_filter.py experiment.csv
-
-# Filter to only two MACs and show stats:
-python python_utils/isac_filter.py experiment.csv \
-    --macs AA:BB:CC:DD:EE:FF 11:22:33:44:55:66
-
-# Keep only "youtube" rows and save to a new file:
-python python_utils/isac_filter.py experiment.csv \
-    --activity youtube --out youtube.csv
-
-# Plot mean amplitude spectrum per activity:
-python python_utils/isac_filter.py experiment.csv --plot
-
-# Plot a single subcarrier time-series coloured by activity:
-python python_utils/isac_filter.py experiment.csv --plot --subcarrier 20
+python python_utils/isac_filter.py experiment.csv --analyze
+python python_utils/isac_filter.py experiment.csv --timeline
+python python_utils/isac_filter.py experiment.csv --macs AA:BB:CC:DD:EE:FF --comm_class video --out video_only.csv
 ```
-
-The `--plot` flag requires `numpy` and `matplotlib`:
-
-```bash
-pip install numpy matplotlib
-```
-
-#### 6. Understanding the output
-
-The CSV now has an **`activity`** column (index 25, just before `CSI_DATA`).
-Use this to group, label, or train a classifier on your data.
-
-Key fields for ISAC analysis:
-
-| Column | Meaning |
-|--------|---------|
-| `mac` | Sender of the Wi-Fi frame — tells you PC vs router direction |
-| `rssi` | Received signal strength (proxy for distance / obstruction) |
-| `sig_len` | Frame payload size — larger during heavy traffic (YouTube) |
-| `rate` / `mcs` | Modulation — higher rate = more data being transferred |
-| `activity` | Your runtime label (e.g. `youtube`, `idle`) |
-| `CSI_DATA` | Complex channel coefficients — the main sensing signal |
 
 ### Advanced:
 
