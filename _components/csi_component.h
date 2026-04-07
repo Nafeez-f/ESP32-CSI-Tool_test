@@ -32,12 +32,13 @@ void isac_set_activity_label(const char *label) {
     printf("Environment label set to: '%s'\n", isac_env_label);
 }
 
-// ---- ISAC: management-frame suppression -----------------------------------
+// ---- ISAC: management-frame output control --------------------------------
 // Beacons, probe req/resp fire the CSI callback every ~100ms per AP on the
-// channel.  They overwhelm the output with "idle"-looking rows and hide the
-// real communication CSI you want for ISAC.
-// Default: suppressed.  Send "SHOWMGMT" / "HIDEMGMT" via serial to toggle.
-static bool isac_show_mgmt = false;
+// channel.  They are labelled comm_class="mgmt" so you can always tell them
+// apart from real data traffic.
+// Default: INCLUDED — gives you continuous CSI even during idle periods.
+// If output bandwidth is a problem, send "HIDEMGMT" to suppress them.
+static bool isac_show_mgmt = true;
 
 // ---- ISAC: automatic communication class ---------------------------------
 // pkt_type: from frame_header_consume_pkt_type() (-1 = unknown)

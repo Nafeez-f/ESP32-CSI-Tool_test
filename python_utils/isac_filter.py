@@ -153,6 +153,11 @@ def parse_args():
         "--stats", action="store_true", default=True,
         help="Print per-comm_class statistics (default: on)",
     )
+    p.add_argument(
+        "--listmacs", action="store_true",
+        help="Print per-MAC summary table (frame counts, direction, RSSI, "
+             "comm_class breakdown) to help identify your hotspot BSSID",
+    )
     return p.parse_args()
 
 
@@ -574,6 +579,50 @@ def plot_mean_spectrum(rows_by_class, subcarrier=None):
     plt.show()
 
 
+# ---- Per-MAC summary -------------------------------------------------------
+
+def print_mac_summary(rows_all):
+    """Print a per-MAC table to help identify the hotspot BSSID."""
+    from collections import defaultdict
+
+    mac_info = defaultdict(lambda: {
+        "count": 0, "rssi_sum": 0, "max_sig_len": 0,
+        "classes": defaultdict(int), "n_up": 0, "n_down": 0, "n_mgmt": 0,
+    })
+
+    for r in rows_all:
+        m = mac_info[r["mac"]]
+        m["count"] += 1
+        m["rssi_sum"] += r["rssi"]
+        if r["sig_len"] > m["max_sig_len"]:
+            m["max_sig_len"] = r["sig_len"]
+        m["classes"][r["comm_class"]] += 1
+        if r["direction"] == "uplink":
+            m["n_up"] += 1
+        elif r["direction"] == "downlink":
+            m["n_down"] += 1
+        if r["comm_class"] == "mgmt":
+            m["n_mgmt"] += 1
+
+    print("\n=== Per-MAC summary (use this to find your hotspot BSSID) ===\n")
+    print(f"{'MAC':<19s} {'Frames':>6s} {'RSSI':>5s} {'MaxLen':>6s} "
+          f"{'Up':>4s} {'Down':>4s} {'Mgmt':>5s}  Top classes")
+    print("-" * 80)
+
+    for mac in sorted(mac_info, key=lambda m: mac_info[m]["count"], reverse=True):
+        m = mac_info[mac]
+        avg_rssi = m["rssi_sum"] // m["count"] if m["count"] else 0
+        top_cls = sorted(m["classes"].items(), key=lambda x: -x[1])
+        cls_str = ", ".join(f"{c}={n}" for c, n in top_cls[:4])
+        print(f"{mac:<19s} {m['count']:>6d} {avg_rssi:>5d} {m['max_sig_len']:>6d} "
+              f"{m['n_up']:>4d} {m['n_down']:>4d} {m['n_mgmt']:>5d}  {cls_str}")
+
+    print("-" * 80)
+    print("Tip: Your hotspot BSSID typically has high frame count, strong RSSI,")
+    print("     and mgmt frames (beacons). Your laptop MAC shows uplink frames.")
+    print()
+
+
 # ---- File output -----------------------------------------------------------
 
 def write_filtered(rows, out_path, header_line):
@@ -614,6 +663,9 @@ def main():
     rows_by_class = defaultdict(list)
     for r in rows_all:
         rows_by_class[r["comm_class"]].append(r)
+
+    if args.listmacs:
+        print_mac_summary(rows_all)
 
     if args.stats:
         stats = compute_stats(rows_by_class)

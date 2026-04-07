@@ -103,6 +103,69 @@ typedef struct {
 static mac_frame_cache_t _mac_frame_cache[MAC_CACHE_SIZE];
 static int _mac_frame_cache_count = 0;
 
+// ---- Per-MAC discovery stats (for LISTMACS command) -----------------------
+// Tracks every unique sender MAC seen on the channel with counts and RSSI,
+// so the user can identify their hotspot BSSID without external tools.
+
+#define MAC_STATS_SIZE 32
+
+typedef struct {
+    uint8_t  mac[6];
+    bool     used;
+    uint32_t data_frames;
+    uint32_t mgmt_frames;
+    int32_t  rssi_sum;
+    uint32_t rssi_count;
+    uint8_t  last_to_ds;
+    uint8_t  last_from_ds;
+    uint32_t max_sig_len;
+} mac_stats_entry_t;
+
+static mac_stats_entry_t _mac_stats[MAC_STATS_SIZE];
+static int _mac_stats_count = 0;
+
+static mac_stats_entry_t* _mac_stats_find_or_create(const uint8_t mac[6]) {
+    for (int i = 0; i < _mac_stats_count; i++) {
+        if (_mac_stats[i].used && memcmp(_mac_stats[i].mac, mac, 6) == 0)
+            return &_mac_stats[i];
+    }
+    if (_mac_stats_count < MAC_STATS_SIZE) {
+        mac_stats_entry_t *e = &_mac_stats[_mac_stats_count++];
+        memset(e, 0, sizeof(*e));
+        memcpy(e->mac, mac, 6);
+        e->used = true;
+        return e;
+    }
+    return NULL;
+}
+
+void frame_header_print_mac_stats() {
+    printf("\n=== MACs seen on this channel ===\n");
+    printf("%-19s %6s %6s %6s %6s %s\n",
+           "MAC", "Data", "Mgmt", "RSSI", "MaxLen", "Direction");
+    printf("--------------------------------------------------------------\n");
+    for (int i = 0; i < _mac_stats_count; i++) {
+        mac_stats_entry_t *e = &_mac_stats[i];
+        if (!e->used) continue;
+        int avg_rssi = e->rssi_count > 0 ? (int)(e->rssi_sum / (int32_t)e->rssi_count) : 0;
+        const char *dir = "?";
+        if (e->last_to_ds && !e->last_from_ds) dir = "uplink";
+        else if (!e->last_to_ds && e->last_from_ds) dir = "downlink";
+        else if (!e->last_to_ds && !e->last_from_ds) dir = "AP/mgmt";
+        printf("%02X:%02X:%02X:%02X:%02X:%02X %6lu %6lu %4d  %6lu  %s\n",
+               e->mac[0], e->mac[1], e->mac[2],
+               e->mac[3], e->mac[4], e->mac[5],
+               (unsigned long)e->data_frames,
+               (unsigned long)e->mgmt_frames,
+               avg_rssi,
+               (unsigned long)e->max_sig_len,
+               dir);
+    }
+    printf("--------------------------------------------------------------\n");
+    printf("Tip: Your hotspot BSSID has high data+mgmt counts and strong RSSI.\n");
+    printf("     Use  WATCHMAC: <mac>  to filter to it.\n\n");
+}
+
 // ---- Single-frame context for CSI callback correlation ---------------------
 // The promiscuous RX callback runs BEFORE the CSI callback for every received
 // frame (both execute in the Wi-Fi driver task, sequentially).  This struct
@@ -175,6 +238,18 @@ static void _frame_header_promiscuous_cb(void *buf, wifi_promiscuous_pkt_type_t 
     memcpy(_last_frame_ctx.mac, hdr->addr2, 6);
     _last_frame_ctx.pkt_type = type;
     _last_frame_ctx.fresh    = true;
+
+    // Update per-MAC discovery stats (for LISTMACS command)
+    mac_stats_entry_t *st = _mac_stats_find_or_create(hdr->addr2);
+    if (st) {
+        if (type == WIFI_PKT_MGMT) st->mgmt_frames++;
+        else                       st->data_frames++;
+        st->rssi_sum += pkt->rx_ctrl.rssi;
+        st->rssi_count++;
+        if (pkt_len > st->max_sig_len) st->max_sig_len = pkt_len;
+        st->last_to_ds   = FC_TO_DS(fc);
+        st->last_from_ds = FC_FROM_DS(fc);
+    }
 
     // Only fill the per-MAC detail cache for DATA frames.
     if (FC_TYPE(fc) != FC_TYPE_DATA) return;

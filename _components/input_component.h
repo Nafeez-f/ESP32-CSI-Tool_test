@@ -145,11 +145,14 @@ void _handle_input() {
 
     } else if (strcmp(input_buffer, "HIDEMGMT") == 0) {
         isac_show_mgmt = false;
-        printf("Management frame CSI now SUPPRESSED (default)\n");
+        printf("Management frame CSI now SUPPRESSED\n");
+
+    } else if (strcmp(input_buffer, "LISTMACS") == 0) {
+        frame_header_print_mac_stats();
 
     } else {
         printf("Unknown command: '%s'\n", input_buffer);
-        printf("Commands: SETTIME | TAG | WATCHMAC | CLEARMAC | CHANNEL | BANDWIDTH | SCAN | SHOWMGMT | HIDEMGMT\n");
+        printf("Commands: SETTIME | TAG | WATCHMAC | CLEARMAC | CHANNEL | BANDWIDTH | SCAN | SHOWMGMT | HIDEMGMT | LISTMACS\n");
     }
 }
 

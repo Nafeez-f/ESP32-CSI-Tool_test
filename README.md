@@ -138,33 +138,44 @@ quick-start guide.
 
 ### Key features
 
-- **Management-frame suppression** — Beacons and probes are filtered out by
-  default so only data-carrying frames appear in the output.
+- **Continuous CSI** — Management frames (beacons) are included and labelled
+  `comm_class=mgmt`, giving you CSI even when no data is flowing.  Use
+  `HIDEMGMT` to suppress them if needed.
 - **Automatic traffic classification** — Each CSI row has a `comm_class` column
   (`video` / `voice` / `browsing` / `background` / `idle` / `data` / `mgmt`)
   derived from 802.11 QoS TID and frame size.  No manual labelling needed.
+- **MAC discovery** — `LISTMACS` command shows all MACs on the channel with
+  frame counts and RSSI, so you can identify your hotspot BSSID.
 - **MAC filtering** — Compile-time or runtime (`WATCHMAC:`) to isolate your
   device pair.
 - **Runtime channel / bandwidth** — `SCAN`, `CHANNEL:`, `BANDWIDTH:` commands.
+
+### Important: iPhone hotspot must use 2.4 GHz
+
+The ESP32 only supports 2.4 GHz.  iPhones default to 5 GHz.  Enable
+**"Maximize Compatibility"** in Settings > Personal Hotspot to force 2.4 GHz.
 
 ### Quick example
 
 ```bash
 cd ./passive
 idf.py flash monitor | python ../python_utils/serial_append_time.py > experiment.csv
-# In another terminal or in the monitor, type:
-#   SCAN                    ← find your hotspot channel
-#   CHANNEL: 6              ← switch to it
-#   WATCHMAC: AA:BB:CC:DD:EE:FF  ← your router/hotspot BSSID
+# In the monitor terminal, type:
+#   SCAN                              <- find your hotspot channel
+#   CHANNEL: 6                        <- switch to it
+#   LISTMACS                          <- see all MACs, find your hotspot
+#   WATCHMAC: DA:80:83:E3:4A:00      <- your hotspot BSSID
+#   WATCHMAC: CA:D5:BB:7F:0B:39      <- your laptop MAC
 # Then play YouTube on the laptop and watch comm_class change to "video".
 ```
 
 ### Post-processing
 
 ```bash
+python python_utils/isac_filter.py experiment.csv --listmacs
 python python_utils/isac_filter.py experiment.csv --analyze
 python python_utils/isac_filter.py experiment.csv --timeline
-python python_utils/isac_filter.py experiment.csv --macs AA:BB:CC:DD:EE:FF --comm_class video --out video_only.csv
+python python_utils/isac_filter.py experiment.csv --macs DA:80:83:E3:4A:00 --comm_class video --out video_only.csv
 ```
 
 ### Advanced:

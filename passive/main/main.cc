@@ -77,8 +77,9 @@ void config_print() {
 #ifdef CONFIG_ISAC_WATCH_MAC_4
     if (strlen(CONFIG_ISAC_WATCH_MAC_4) > 0) printf("    MAC_4: %s\n", CONFIG_ISAC_WATCH_MAC_4);
 #endif
-    printf("  Management frames (beacons, probes) are SUPPRESSED by default.\n");
-    printf("  Only data frames appear — these carry the traffic you care about.\n");
+    printf("  Management frames (beacons, probes) are INCLUDED and labelled mgmt.\n");
+    printf("  This gives continuous CSI even when no data is flowing.\n");
+    printf("  Use HIDEMGMT to suppress them if output is too fast.\n");
     printf("\n");
     printf("  Runtime commands:\n");
     printf("    SCAN              - find your router's channel automatically\n");
@@ -89,8 +90,9 @@ void config_print() {
     printf("    CLEARMAC          - remove all MAC filters\n");
     printf("    TAG: <label>      - label subsequent CSI rows\n");
     printf("    SETTIME: <unix>   - set real-time clock\n");
-    printf("    SHOWMGMT          - include management frame CSI in output\n");
-    printf("    HIDEMGMT          - suppress management frame CSI (default)\n");
+    printf("    SHOWMGMT          - include management frame CSI (default)\n");
+    printf("    HIDEMGMT          - suppress management frame CSI\n");
+    printf("    LISTMACS          - show all MACs seen so far with frame counts\n");
     printf("-----------------------\n");
     printf("\n\n\n\n\n\n\n\n");
 }
