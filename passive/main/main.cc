@@ -137,13 +137,14 @@ extern "C" void app_main(void) {
     csi_init((char *) "PASSIVE");
 
 #ifdef CONFIG_ISAC_AUTO_SCAN
-    printf("\n=== AUTO-SCAN: finding best channel + bandwidth ===\n");
-    printf("(disable in menuconfig > ESP32 CSI Tool Config > Auto-scan if not needed)\n\n");
+    {
+        int dwell = 500;
 #ifdef CONFIG_ISAC_AUTO_SCAN_DWELL_MS
-    _do_channel_scan_ex(CONFIG_ISAC_AUTO_SCAN_DWELL_MS, true);
-#else
-    _do_channel_scan_ex(500, true);
+        dwell = CONFIG_ISAC_AUTO_SCAN_DWELL_MS;
 #endif
+        printf("\n=== AUTO-SCAN: finding best bandwidth for channel %d ===\n", WIFI_CHANNEL);
+        _do_bandwidth_scan(WIFI_CHANNEL, dwell);
+    }
 #endif
 
     input_loop();

@@ -46,15 +46,16 @@ menu "ESP32 CSI Tool Config"
             If you do though, the program will be recognize this and not attempt writing to the SD card.
 
     config ISAC_AUTO_SCAN
-        bool "Auto-scan channels and bandwidth at boot"
+        bool "Auto-test bandwidth (HT20/HT40) at boot"
         default "y"
         help
-            On startup, cycle through channels 1-13 with HT20/HT40-above/HT40-below
-            and automatically select the channel+bandwidth with the most frames.
-            This removes the need to type SCAN in the monitor (which does not work
-            when the monitor output is piped to a file).
-            After scan, prints a LISTMACS table so you can identify your router.
-            Disable this if you know the channel and want faster boot.
+            On startup, test HT20/HT40-above/HT40-below on the configured WiFi
+            Channel and pick the mode with the most frames. Does NOT change the
+            channel — only the bandwidth mode.
+            This is needed because routers use either HT40-above or HT40-below
+            and picking the wrong one means missing all HT data frames.
+            After the test, prints a LISTMACS table.
+            Disable this if you already know the correct bandwidth mode.
 
     config ISAC_AUTO_SCAN_DWELL_MS
         depends on ISAC_AUTO_SCAN

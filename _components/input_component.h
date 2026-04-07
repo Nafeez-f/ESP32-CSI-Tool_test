@@ -45,6 +45,52 @@ void _set_channel(int ch) {
     }
 }
 
+// Test HT20/HT40-above/HT40-below on a SINGLE channel and pick the best.
+// Called at boot to find the right bandwidth without changing the user's channel.
+void _do_bandwidth_scan(int channel, int dwell_ms) {
+    printf("BW-SCAN: testing HT20, HT40-above, HT40-below on channel %d (%d ms each)...\n\n",
+           channel, dwell_ms);
+
+    ESP_ERROR_CHECK(esp_wifi_set_csi_rx_cb(&_scan_csi_cb, NULL));
+
+    const wifi_second_chan_t modes[] = {
+        WIFI_SECOND_CHAN_NONE, WIFI_SECOND_CHAN_ABOVE, WIFI_SECOND_CHAN_BELOW
+    };
+    const char *mode_names[] = {"HT20", "HT40-above", "HT40-below"};
+
+    int best_count = 0;
+    wifi_second_chan_t best_mode = WIFI_SECOND_CHAN_ABOVE;
+    const char *best_name = "HT40-above";
+
+    for (int m = 0; m < 3; m++) {
+        _scan_frame_count = 0;
+        esp_err_t err = esp_wifi_set_channel(channel, modes[m]);
+        if (err != ESP_OK) {
+            printf("BW-SCAN: %s failed (err 0x%x), skipping\n", mode_names[m], err);
+            continue;
+        }
+        vTaskDelay(dwell_ms / portTICK_PERIOD_MS);
+        int cnt = _scan_frame_count;
+        int scaled = (cnt * 1000) / dwell_ms;
+        printf("BW-SCAN: %s -> %d frames/s %s\n",
+               mode_names[m], scaled, cnt > best_count ? " <- BEST" : "");
+        if (cnt > best_count) {
+            best_count = cnt;
+            best_mode = modes[m];
+            best_name = mode_names[m];
+        }
+    }
+
+    ESP_ERROR_CHECK(esp_wifi_set_csi_rx_cb(&_wifi_csi_cb, NULL));
+    esp_wifi_set_channel(channel, best_mode);
+    printf("\nBW-SCAN: channel %d locked to %s (%d frames/s)\n",
+           channel, best_name, (best_count * 1000) / dwell_ms);
+
+    printf("BW-SCAN: collecting MACs for 5 seconds...\n");
+    vTaskDelay(5000 / portTICK_PERIOD_MS);
+    frame_header_print_mac_stats();
+}
+
 // Scan all 2.4 GHz channels trying HT20/HT40-above/HT40-below per channel.
 // dwell_ms = how long to listen per mode (500 for auto-boot, 1000 for manual).
 // If print_macs is true, prints LISTMACS table after scan completes.
