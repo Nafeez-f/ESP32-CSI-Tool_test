@@ -45,25 +45,6 @@ menu "ESP32 CSI Tool Config"
             If your ESP32 does not have an SD card, there is no reason to use this feature.
             If you do though, the program will be recognize this and not attempt writing to the SD card.
 
-    config ISAC_WIFI_SSID
-        string "WiFi SSID to join (for HT/VHT CSI capture)"
-        default ""
-        help
-            Set this to your router's SSID. The ESP32 will connect as a STA
-            and enable promiscuous mode on top. This is REQUIRED to capture
-            CSI from HT/VHT (802.11n/ac) frames — which is all modern traffic
-            including YouTube, browsing, etc.
-            Without this, pure promiscuous mode (WIFI_MODE_NULL) can only
-            produce CSI from legacy-rate frames (beacons, keepalives).
-            Leave empty to use pure promiscuous mode (legacy frames only).
-
-    config ISAC_WIFI_PASSWORD
-        depends on ISAC_WIFI_SSID != ""
-        string "WiFi password"
-        default ""
-        help
-            Password for the WiFi network. Leave empty for open networks.
-
     menu "ISAC MAC Filter (optional)"
         depends on SHOULD_COLLECT_CSI
         comment "Leave blank to collect CSI from every sender on the channel."
