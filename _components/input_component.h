@@ -45,16 +45,13 @@ void _set_channel(int ch) {
     }
 }
 
-// Scan all 2.4 GHz channels for 2 seconds each and print frame counts.
-// This lets you find your router's channel without a separate tool.
-void _do_channel_scan() {
+// Scan all 2.4 GHz channels trying HT20/HT40-above/HT40-below per channel.
+// dwell_ms = how long to listen per mode (500 for auto-boot, 1000 for manual).
+// If print_macs is true, prints LISTMACS table after scan completes.
+void _do_channel_scan_ex(int dwell_ms, bool print_macs) {
     printf("\nSCAN: cycling channels 1-13...\n");
-    printf("SCAN: testing HT20, HT40-above, HT40-below for each channel.\n");
+    printf("SCAN: testing HT20, HT40-above, HT40-below (%d ms each).\n", dwell_ms);
     printf("SCAN: (CSI rows are suppressed during scan)\n\n");
-
-    uint8_t orig_primary;
-    wifi_second_chan_t orig_second;
-    esp_wifi_get_channel(&orig_primary, &orig_second);
 
     ESP_ERROR_CHECK(esp_wifi_set_csi_rx_cb(&_scan_csi_cb, NULL));
 
@@ -75,7 +72,7 @@ void _do_channel_scan() {
             _scan_frame_count = 0;
             esp_err_t err = esp_wifi_set_channel(ch, modes[m]);
             if (err != ESP_OK) continue;
-            vTaskDelay(1000 / portTICK_PERIOD_MS);
+            vTaskDelay(dwell_ms / portTICK_PERIOD_MS);
             int cnt = _scan_frame_count;
             if (cnt > ch_best) {
                 ch_best = cnt;
@@ -84,8 +81,9 @@ void _do_channel_scan() {
             }
         }
 
+        int scaled = (ch_best * 1000) / dwell_ms;
         printf("SCAN: ch %2d  ->  %4d frames/s  best_mode=%s %s\n",
-               ch, ch_best, ch_best_name,
+               ch, scaled, ch_best_name,
                ch_best > best_count ? "  <- BEST" : "");
         if (ch_best > best_count) {
             best_count = ch_best;
@@ -96,13 +94,23 @@ void _do_channel_scan() {
 
     const char *sec_str = best_second==WIFI_SECOND_CHAN_NONE?"HT20":
                           best_second==WIFI_SECOND_CHAN_ABOVE?"HT40-above":"HT40-below";
+    int scaled_best = (best_count * 1000) / dwell_ms;
     printf("\nSCAN: done. Best: channel %d, %s (%d frames/s)\n",
-           best_ch, sec_str, best_count);
-    printf("SCAN: now locked to channel %d with %s.\n", best_ch, sec_str);
-    printf("SCAN: use LISTMACS to identify your hotspot.\n\n");
+           best_ch, sec_str, scaled_best);
 
     ESP_ERROR_CHECK(esp_wifi_set_csi_rx_cb(&_wifi_csi_cb, NULL));
     esp_wifi_set_channel(best_ch, best_second);
+    printf("SCAN: now locked to channel %d with %s.\n\n", best_ch, sec_str);
+
+    if (print_macs) {
+        printf("SCAN: collecting MACs for 5 seconds...\n");
+        vTaskDelay(5000 / portTICK_PERIOD_MS);
+        frame_header_print_mac_stats();
+    }
+}
+
+void _do_channel_scan() {
+    _do_channel_scan_ex(1000, true);
 }
 
 // ---- Command dispatcher --------------------------------------------------

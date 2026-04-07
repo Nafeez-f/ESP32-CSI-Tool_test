@@ -135,5 +135,16 @@ extern "C" void app_main(void) {
     sd_init();
     passive_init();
     csi_init((char *) "PASSIVE");
+
+#ifdef CONFIG_ISAC_AUTO_SCAN
+    printf("\n=== AUTO-SCAN: finding best channel + bandwidth ===\n");
+    printf("(disable in menuconfig > ESP32 CSI Tool Config > Auto-scan if not needed)\n\n");
+#ifdef CONFIG_ISAC_AUTO_SCAN_DWELL_MS
+    _do_channel_scan_ex(CONFIG_ISAC_AUTO_SCAN_DWELL_MS, true);
+#else
+    _do_channel_scan_ex(500, true);
+#endif
+#endif
+
     input_loop();
 }

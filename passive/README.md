@@ -23,99 +23,87 @@ You get **continuous CSI** from management frames (beacons) even when no
 data is flowing.  The `comm_class` column tells you exactly which frames
 are communication traffic vs background — no manual labelling needed.
 
-## Important setup notes
+## What happens at boot (auto-scan)
 
-### iPhone hotspot: enable "Maximize Compatibility"
+On power-up, the firmware **automatically scans channels 1-13** trying
+HT20, HT40-above, and HT40-below for each.  It picks the channel and
+bandwidth with the most frames, then collects for 5 seconds and prints
+a `LISTMACS` table showing every MAC it found.
 
-The ESP32 only supports 2.4 GHz.  Modern iPhones may default to 5 GHz
-for Personal Hotspot.  On your iPhone, go to **Settings > Personal Hotspot**
-and enable **"Maximize Compatibility"** to force 2.4 GHz.
+**You do not need to type anything.**  Just flash, plug in, and pipe the
+output to a file.  The auto-scan takes ~25 seconds, then CSI collection
+starts automatically on the best channel.
 
-### HT40 bandwidth is critical
+To disable auto-scan (if you already know the channel): `idf.py menuconfig`
+> ESP32 CSI Tool Config > uncheck "Auto-scan channels and bandwidth at boot".
 
-Modern hotspots (including iPhone) use **HT40** (40 MHz channels) for data.
-If the ESP32 is in HT20 mode, it will **only see legacy-rate frames**
-(beacons, keepalives) — all the actual video/browsing data will be invisible.
+## Quick-start
 
-This firmware defaults to **HT40-above** (`WIFI_SECOND_CHAN_ABOVE`).  If you
-still see no HT frames, try:
-```
-BANDWIDTH: 40below
-```
-The `SCAN` command now **automatically tests HT20, HT40-above, and HT40-below**
-for every channel and picks the best combination.
-
-### How to tell if HT40 is working
-
-Type `LISTMACS` and look at the **HT** column.  If all zeros, you are only
-seeing legacy frames.  If non-zero, you are capturing the real HT/VHT traffic.
-
-### MAC addresses: use `airport -I`, not `arp -a`
-
-iPhones use **MAC randomization** — the MAC in the ARP table can differ from
-the 802.11 BSSID in over-the-air frames.  On your MacBook:
-
-```bash
-# Correct way: shows the actual BSSID as seen in Wi-Fi frames
-/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport -I
-
-# Also get your MacBook Wi-Fi MAC
-ifconfig en0 | grep ether
-```
-
-Or just use `LISTMACS` on the ESP32 to discover all MACs empirically.
-
-## Quick-start: MacBook + iPhone hotspot
-
-### 1. Prepare iPhone
-
-Settings > Personal Hotspot > **Maximize Compatibility** = ON
-
-### 2. Connect MacBook to the hotspot
-
-### 3. Flash and run
+### 1. Flash and collect
 
 ```bash
 cd passive
-idf.py menuconfig   # Set WiFi Channel if you know it
+idf.py menuconfig    # optional: set channel, MAC filter, etc.
 idf.py flash monitor | python ../python_utils/serial_append_time.py > experiment.csv
 ```
 
-### 4. Find the right channel and bandwidth (in the monitor)
+The monitor output is piped to a file.  **You cannot type commands into
+the monitor when piping** — that's normal.  The auto-scan handles channel
+and bandwidth selection for you automatically.
 
+### 2. Watch the boot output
+
+In the first ~25 seconds you'll see:
 ```
-SCAN
-```
+=== AUTO-SCAN: finding best channel + bandwidth ===
+SCAN: ch  1  ->    12 frames/s  best_mode=HT20
+SCAN: ch  6  ->   185 frames/s  best_mode=HT40a   <- BEST
+...
+SCAN: done. Best: channel 6, HT40-above (185 frames/s)
+SCAN: now locked to channel 6 with HT40-above.
 
-This now tests HT20 + HT40-above + HT40-below on every channel and picks
-the combination with the most frames.  It automatically sets the channel
-and bandwidth.
+SCAN: collecting MACs for 5 seconds...
 
-### 5. Identify your hotspot
-
-```
-LISTMACS
-```
-
-Look for the MAC with:
-- Strong **RSSI** (close to your ESP32, e.g. -25 to -40 dBm)
-- Non-zero **HT** column (capturing HT/VHT data frames)
-- Both **Data** and **Mgmt** counts (beacons + data)
-
-Then filter to it:
-```
-WATCHMAC: DA:80:83:E3:4A:00
-WATCHMAC: CA:D5:BB:7F:0B:39
+=== MACs seen on this channel ===
+MAC                  Data   Mgmt    HT  RSSI MaxLen  Direction
+-------------------------------------------------------------------
+F0:A7:31:08:72:8E     142     52    98   -35   1480  downlink   <- your router
+BA:87:BA:8E:58:DA      28      0    12   -30     28  uplink     <- your laptop
+...
 ```
 
-### 6. Generate traffic and observe
+### 3. Identify your MACs
 
-Play YouTube on the MacBook.  You should now see:
-- `video` — YouTube data frames (large sig_len, TID 4/5)
-- `mgmt` — beacons from hotspot (continuous, even during idle)
-- `idle` — keepalive null-data frames from MacBook
+From your MacBook:
+```bash
+# Router MAC (BSSID)
+/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport -I
+# Look for "BSSID" line
 
-### 7. Analyse
+# Your laptop MAC
+ifconfig en0 | grep ether
+```
+
+**Do NOT use `arp -a`** — it can show a different MAC due to randomization.
+
+In the LISTMACS table:
+- **Router**: strong RSSI, high Data+Mgmt+HT counts, direction "downlink"
+- **Laptop**: strong RSSI, direction "uplink", mostly idle/keepalive frames
+
+### 4. (Optional) Filter to your MACs via menuconfig
+
+If you want to filter CSI to only your router + laptop, set their MACs
+in `idf.py menuconfig` > ESP32 CSI Tool Config > ISAC MAC Filter, then
+reflash.  This removes neighbour traffic from the output.
+
+### 5. Generate traffic and observe
+
+Play YouTube on the MacBook.  The `comm_class` column will show:
+- `video` — YouTube data frames (large sig_len, TID 4/5, HT/VHT)
+- `mgmt` — beacons (continuous, even during idle)
+- `idle` — keepalive null-data frames
+
+### 6. Analyse
 
 ```bash
 python python_utils/isac_filter.py experiment.csv --listmacs
@@ -123,11 +111,30 @@ python python_utils/isac_filter.py experiment.csv --analyze
 python python_utils/isac_filter.py experiment.csv --timeline
 ```
 
+## HT40 bandwidth: why it matters
+
+Modern routers and hotspots use **HT40** (40 MHz channels).  Data frames
+are transmitted across both the primary and secondary 20 MHz channels.  If
+the ESP32 listens in HT20 mode, it misses these frames entirely — you only
+see legacy-rate beacons and keepalives (all `sig_mode=0`, `MCS=0`).
+
+Symptoms of wrong bandwidth:
+- Only 4 `video` frames out of 2000+ total (almost all `idle`)
+- All `MCS=0` even during active YouTube playback
+- Very high retry rate (50-100%) on the few data frames that do appear
+- `sig_mode=0` on everything (no HT frames)
+
+The auto-scan fixes this by testing all three modes per channel.  The
+secondary channel can be "above" (e.g. ch6+ch10) or "below" (e.g. ch6+ch2)
+— depends on what the router negotiates with the client.
+
 ## Runtime commands
+
+If you run `idf.py monitor` without piping (interactive mode), you can type:
 
 | Command | Effect |
 |---|---|
-| `SCAN` | Sweep channels 1-13 with HT20/HT40 modes, auto-select best |
+| `SCAN` | Re-scan channels with HT20/HT40 modes |
 | `CHANNEL: <n>` | Switch to channel n (1-13), preserves bandwidth |
 | `BANDWIDTH: 20\|40above\|40below` | Set bandwidth mode |
 | `WATCHMAC: <mac>` | Add a MAC to the filter list (up to 4) |
@@ -138,37 +145,32 @@ python python_utils/isac_filter.py experiment.csv --timeline
 | `HIDEMGMT` | Suppress management frame CSI |
 | `SETTIME: <unix>` | Set the real-time clock |
 
+**Note:** Commands only work if the monitor is interactive (not piped).
+When piping (`| python ... > file.csv`), use menuconfig or auto-scan instead.
+
 ## Troubleshooting
 
-**"I only see `idle` / `data` — no `video` even during YouTube"**
+**"I only see `idle` — no `video` even during YouTube"**
 
-This almost always means you are missing the HT40 data frames:
+1. Check the LISTMACS table at boot — is the **HT** column non-zero?
+   - If all zeros: the auto-scan may have picked HT20.  Try reflashing
+     after setting the channel manually in menuconfig, then test
+     `BANDWIDTH: 40above` and `BANDWIDTH: 40below` interactively.
+2. Verify you are on the correct channel (`airport -I` on macOS shows it)
+3. If using iPhone hotspot, ensure "Maximize Compatibility" is ON
 
-1. Run `LISTMACS` and check the **HT** column.  If all zeros:
-   - Try `BANDWIDTH: 40above` or `BANDWIDTH: 40below`
-   - Or run `SCAN` which tests all modes automatically
-2. Verify you are on the **correct channel** (use `SCAN` or `airport -I`)
-3. Verify the iPhone hotspot is on **2.4 GHz** ("Maximize Compatibility" ON)
+**"The MAC from `arp -a` does not appear in CSI data"**
 
-**"I see DA:80:83:E3:4A:00 but not the MAC from `arp -a`"**
-
-Normal.  iPhone uses MAC randomization — the ARP MAC differs from the
-802.11 BSSID.  Use `airport -I` or `LISTMACS` to find the real BSSID.
-
-**"I see many MACs I don't recognize"**
-
-These are neighbours' devices.  Use `WATCHMAC:` to filter to just your
-hotspot BSSID and laptop MAC.
+Normal.  Use `airport -I` for the correct BSSID, or read the LISTMACS
+table printed at boot.
 
 ## CSV column layout
-
-See `isac_filter.py` header for the full 35-column layout.  Key columns:
 
 | Index | Column | Use |
 |---|---|---|
 | 2 | `mac` | Sender MAC |
 | 3 | `rssi` | Signal strength |
-| 5 | `sig_mode` | 0=legacy, 1=HT, 2=VHT (should be 1+ for real data) |
+| 5 | `sig_mode` | 0=legacy, 1=HT, 2=VHT (must be 1+ for real data) |
 | 20 | `sig_len` | Frame size — larger during video streaming |
 | 27 | `to_ds` | 1 = uplink (device -> router) |
 | 28 | `from_ds` | 1 = downlink (router -> device) |
