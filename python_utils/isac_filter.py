@@ -81,6 +81,7 @@ from collections import defaultdict
 COL_MAC        = 2
 COL_RSSI       = 3
 COL_RATE       = 4
+COL_SIG_MODE   = 5
 COL_MCS        = 6
 COL_NOISE_FL   = 14
 COL_AMPDU_CNT  = 15
@@ -238,6 +239,7 @@ def load_csv(path, watch_macs=None, comm_class_filter=None, env_label_filter=Non
                 "mac":            mac,
                 "rssi":           _int_or(parts[COL_RSSI]),
                 "rate":           _int_or(parts[COL_RATE]),
+                "sig_mode":       _int_or(parts[COL_SIG_MODE]),
                 "mcs":            _int_or(parts[COL_MCS]),
                 "noise_floor":    _int_or(parts[COL_NOISE_FL]),
                 "ampdu_cnt":      _int_or(parts[COL_AMPDU_CNT]),
@@ -586,7 +588,7 @@ def print_mac_summary(rows_all):
     from collections import defaultdict
 
     mac_info = defaultdict(lambda: {
-        "count": 0, "rssi_sum": 0, "max_sig_len": 0,
+        "count": 0, "rssi_sum": 0, "max_sig_len": 0, "ht_frames": 0,
         "classes": defaultdict(int), "n_up": 0, "n_down": 0, "n_mgmt": 0,
     })
 
@@ -596,6 +598,8 @@ def print_mac_summary(rows_all):
         m["rssi_sum"] += r["rssi"]
         if r["sig_len"] > m["max_sig_len"]:
             m["max_sig_len"] = r["sig_len"]
+        if r["sig_mode"] > 0:
+            m["ht_frames"] += 1
         m["classes"][r["comm_class"]] += 1
         if r["direction"] == "uplink":
             m["n_up"] += 1
@@ -604,22 +608,35 @@ def print_mac_summary(rows_all):
         if r["comm_class"] == "mgmt":
             m["n_mgmt"] += 1
 
+    total_ht = sum(m["ht_frames"] for m in mac_info.values())
+
     print("\n=== Per-MAC summary (use this to find your hotspot BSSID) ===\n")
-    print(f"{'MAC':<19s} {'Frames':>6s} {'RSSI':>5s} {'MaxLen':>6s} "
+    print(f"{'MAC':<19s} {'Frames':>6s} {'HT':>5s} {'RSSI':>5s} {'MaxLen':>6s} "
           f"{'Up':>4s} {'Down':>4s} {'Mgmt':>5s}  Top classes")
-    print("-" * 80)
+    print("-" * 85)
 
     for mac in sorted(mac_info, key=lambda m: mac_info[m]["count"], reverse=True):
         m = mac_info[mac]
         avg_rssi = m["rssi_sum"] // m["count"] if m["count"] else 0
         top_cls = sorted(m["classes"].items(), key=lambda x: -x[1])
         cls_str = ", ".join(f"{c}={n}" for c, n in top_cls[:4])
-        print(f"{mac:<19s} {m['count']:>6d} {avg_rssi:>5d} {m['max_sig_len']:>6d} "
-              f"{m['n_up']:>4d} {m['n_down']:>4d} {m['n_mgmt']:>5d}  {cls_str}")
+        print(f"{mac:<19s} {m['count']:>6d} {m['ht_frames']:>5d} {avg_rssi:>5d} "
+              f"{m['max_sig_len']:>6d} {m['n_up']:>4d} {m['n_down']:>4d} "
+              f"{m['n_mgmt']:>5d}  {cls_str}")
 
-    print("-" * 80)
-    print("Tip: Your hotspot BSSID typically has high frame count, strong RSSI,")
-    print("     and mgmt frames (beacons). Your laptop MAC shows uplink frames.")
+    print("-" * 85)
+
+    if total_ht == 0:
+        print("WARNING: No HT/VHT frames in this capture (HT column all zeros)!")
+        print("  You only captured legacy-rate frames (beacons, keepalives).")
+        print("  The real data traffic was likely using HT40 which the ESP32 missed.")
+        print("  Re-capture with: BANDWIDTH: 40above  or run SCAN (tests all modes).")
+    else:
+        print(f"HT column = 802.11n/ac frames ({total_ht} total). "
+              f"Your hotspot has strong RSSI + high HT count.")
+
+    print("Your laptop MAC shows uplink frames. "
+          "Hotspot BSSID shows mgmt (beacons) + data.")
     print()
 
 

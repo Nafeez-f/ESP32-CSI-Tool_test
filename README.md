@@ -150,10 +150,13 @@ quick-start guide.
   device pair.
 - **Runtime channel / bandwidth** — `SCAN`, `CHANNEL:`, `BANDWIDTH:` commands.
 
-### Important: iPhone hotspot must use 2.4 GHz
+### Important setup
 
-The ESP32 only supports 2.4 GHz.  iPhones default to 5 GHz.  Enable
-**"Maximize Compatibility"** in Settings > Personal Hotspot to force 2.4 GHz.
+- **iPhone**: Enable "Maximize Compatibility" in Settings > Personal Hotspot
+  to ensure 2.4 GHz (the ESP32 only supports 2.4 GHz).
+- **HT40**: The firmware defaults to HT40 (40 MHz). If you only see legacy
+  frames (all `sig_mode=0`), run `SCAN` which now tests HT20/HT40 modes
+  automatically, or try `BANDWIDTH: 40above` / `BANDWIDTH: 40below`.
 
 ### Quick example
 

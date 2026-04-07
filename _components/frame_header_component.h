@@ -114,6 +114,7 @@ typedef struct {
     bool     used;
     uint32_t data_frames;
     uint32_t mgmt_frames;
+    uint32_t ht_frames;       // sig_mode > 0 (HT/VHT — real traffic)
     int32_t  rssi_sum;
     uint32_t rssi_count;
     uint8_t  last_to_ds;
@@ -141,29 +142,43 @@ static mac_stats_entry_t* _mac_stats_find_or_create(const uint8_t mac[6]) {
 
 void frame_header_print_mac_stats() {
     printf("\n=== MACs seen on this channel ===\n");
-    printf("%-19s %6s %6s %6s %6s %s\n",
-           "MAC", "Data", "Mgmt", "RSSI", "MaxLen", "Direction");
-    printf("--------------------------------------------------------------\n");
+    printf("%-19s %6s %6s %5s %5s %6s %s\n",
+           "MAC", "Data", "Mgmt", "HT", "RSSI", "MaxLen", "Direction");
+    printf("-------------------------------------------------------------------\n");
+
+    uint32_t total_ht = 0;
     for (int i = 0; i < _mac_stats_count; i++) {
         mac_stats_entry_t *e = &_mac_stats[i];
         if (!e->used) continue;
+        total_ht += e->ht_frames;
         int avg_rssi = e->rssi_count > 0 ? (int)(e->rssi_sum / (int32_t)e->rssi_count) : 0;
         const char *dir = "?";
         if (e->last_to_ds && !e->last_from_ds) dir = "uplink";
         else if (!e->last_to_ds && e->last_from_ds) dir = "downlink";
         else if (!e->last_to_ds && !e->last_from_ds) dir = "AP/mgmt";
-        printf("%02X:%02X:%02X:%02X:%02X:%02X %6lu %6lu %4d  %6lu  %s\n",
+        printf("%02X:%02X:%02X:%02X:%02X:%02X %6lu %6lu %5lu %5d %6lu  %s\n",
                e->mac[0], e->mac[1], e->mac[2],
                e->mac[3], e->mac[4], e->mac[5],
                (unsigned long)e->data_frames,
                (unsigned long)e->mgmt_frames,
+               (unsigned long)e->ht_frames,
                avg_rssi,
                (unsigned long)e->max_sig_len,
                dir);
     }
-    printf("--------------------------------------------------------------\n");
-    printf("Tip: Your hotspot BSSID has high data+mgmt counts and strong RSSI.\n");
-    printf("     Use  WATCHMAC: <mac>  to filter to it.\n\n");
+    printf("-------------------------------------------------------------------\n");
+
+    if (total_ht == 0) {
+        printf("WARNING: No HT/VHT frames seen (HT column all zeros)!\n");
+        printf("  This means you are only capturing legacy-rate frames (beacons,\n");
+        printf("  keepalives). Your hotspot's data traffic is likely using HT40.\n");
+        printf("  Try:  BANDWIDTH: 40above  or  BANDWIDTH: 40below\n");
+        printf("  Or run SCAN which now tests all bandwidth modes automatically.\n\n");
+    } else {
+        printf("HT column = 802.11n/ac frames (the real data traffic).\n");
+        printf("Your hotspot: strong RSSI + high HT count + data+mgmt frames.\n");
+    }
+    printf("Use  WATCHMAC: <mac>  to filter to your hotspot + laptop.\n\n");
 }
 
 // ---- Single-frame context for CSI callback correlation ---------------------
@@ -244,6 +259,7 @@ static void _frame_header_promiscuous_cb(void *buf, wifi_promiscuous_pkt_type_t 
     if (st) {
         if (type == WIFI_PKT_MGMT) st->mgmt_frames++;
         else                       st->data_frames++;
+        if (pkt->rx_ctrl.sig_mode > 0) st->ht_frames++;
         st->rssi_sum += pkt->rx_ctrl.rssi;
         st->rssi_count++;
         if (pkt_len > st->max_sig_len) st->max_sig_len = pkt_len;

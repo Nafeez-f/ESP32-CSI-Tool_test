@@ -48,11 +48,10 @@ void _set_channel(int ch) {
 // Scan all 2.4 GHz channels for 2 seconds each and print frame counts.
 // This lets you find your router's channel without a separate tool.
 void _do_channel_scan() {
-    printf("\nSCAN: cycling channels 1-13, 2 seconds each...\n");
-    printf("SCAN: the channel with the most frames is your router's channel.\n");
+    printf("\nSCAN: cycling channels 1-13...\n");
+    printf("SCAN: testing HT20, HT40-above, HT40-below for each channel.\n");
     printf("SCAN: (CSI rows are suppressed during scan)\n\n");
 
-    // Remember current settings to restore after scan
     uint8_t orig_primary;
     wifi_second_chan_t orig_second;
     esp_wifi_get_channel(&orig_primary, &orig_second);
@@ -60,25 +59,50 @@ void _do_channel_scan() {
     ESP_ERROR_CHECK(esp_wifi_set_csi_rx_cb(&_scan_csi_cb, NULL));
 
     int best_ch = 1, best_count = 0;
+    wifi_second_chan_t best_second = WIFI_SECOND_CHAN_ABOVE;
+
+    const wifi_second_chan_t modes[] = {
+        WIFI_SECOND_CHAN_NONE, WIFI_SECOND_CHAN_ABOVE, WIFI_SECOND_CHAN_BELOW
+    };
+    const char *mode_names[] = {"HT20", "HT40a", "HT40b"};
+
     for (int ch = 1; ch <= 13; ch++) {
-        _scan_frame_count = 0;
-        esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
-        vTaskDelay(2000 / portTICK_PERIOD_MS);
-        int cnt = _scan_frame_count;
-        printf("SCAN: ch %2d  ->  %3d frames/2s %s\n",
-               ch, cnt, cnt > best_count ? "  <- best so far" : "");
-        if (cnt > best_count) { best_count = cnt; best_ch = ch; }
+        int ch_best = 0;
+        wifi_second_chan_t ch_best_mode = WIFI_SECOND_CHAN_NONE;
+        const char *ch_best_name = "HT20";
+
+        for (int m = 0; m < 3; m++) {
+            _scan_frame_count = 0;
+            esp_err_t err = esp_wifi_set_channel(ch, modes[m]);
+            if (err != ESP_OK) continue;
+            vTaskDelay(1000 / portTICK_PERIOD_MS);
+            int cnt = _scan_frame_count;
+            if (cnt > ch_best) {
+                ch_best = cnt;
+                ch_best_mode = modes[m];
+                ch_best_name = mode_names[m];
+            }
+        }
+
+        printf("SCAN: ch %2d  ->  %4d frames/s  best_mode=%s %s\n",
+               ch, ch_best, ch_best_name,
+               ch_best > best_count ? "  <- BEST" : "");
+        if (ch_best > best_count) {
+            best_count = ch_best;
+            best_ch = ch;
+            best_second = ch_best_mode;
+        }
     }
 
-    printf("\nSCAN: done. Best channel: %d (%d frames)\n", best_ch, best_count);
-    printf("SCAN: run  CHANNEL: %d  to lock onto it.\n\n", best_ch);
+    const char *sec_str = best_second==WIFI_SECOND_CHAN_NONE?"HT20":
+                          best_second==WIFI_SECOND_CHAN_ABOVE?"HT40-above":"HT40-below";
+    printf("\nSCAN: done. Best: channel %d, %s (%d frames/s)\n",
+           best_ch, sec_str, best_count);
+    printf("SCAN: now locked to channel %d with %s.\n", best_ch, sec_str);
+    printf("SCAN: use LISTMACS to identify your hotspot.\n\n");
 
     ESP_ERROR_CHECK(esp_wifi_set_csi_rx_cb(&_wifi_csi_cb, NULL));
-    // Restore HT40 setting on the best channel
-    esp_wifi_set_channel(best_ch, orig_second);
-    printf("CHANNEL: now listening on channel %d (secondary=%s)\n", best_ch,
-           orig_second==WIFI_SECOND_CHAN_NONE?"none":
-           orig_second==WIFI_SECOND_CHAN_ABOVE?"above":"below");
+    esp_wifi_set_channel(best_ch, best_second);
 }
 
 // ---- Command dispatcher --------------------------------------------------
