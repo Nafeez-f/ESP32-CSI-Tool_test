@@ -1,0 +1,32 @@
+menu "Passive CSI Config"
+
+    config CSI_CHANNEL
+        int "WiFi Channel to listen on"
+        default 6
+        help
+            The 2.4 GHz channel your AP/hotspot is using.
+            Run 'airport -I | grep channel' on macOS to find it.
+            Valid range: 1-13.
+
+    config CSI_CHANNEL_BW
+        int "Channel bandwidth: 0=HT20 (20MHz)  1=HT40-above  2=HT40-below"
+        default 1
+        help
+            Modern APs and phone hotspots almost always use HT40 (40MHz).
+            HT40-above means the secondary channel is above the primary
+            (e.g. primary=6, secondary=10).
+            HT40-below means the secondary channel is below
+            (e.g. primary=6, secondary=2).
+            If you see zero data frames from your AP, try the other value.
+            Default 1 (HT40-above) works for most iPhone hotspots on ch6.
+
+    config CSI_LLTF_ONLY
+        bool "Collect LLTF only (smaller CSI, higher throughput)"
+        default y
+        help
+            LLTF (Legacy Long Training Field) is present in every frame.
+            Enabling this limits CSI to 128 bytes (64 subcarriers) per frame
+            and keeps the serial port from saturating.
+            Disable only if you need HT-LTF data and have a fast baud rate.
+
+endmenu
