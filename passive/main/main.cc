@@ -63,7 +63,9 @@ void config_print() {
     printf("SEND_CSI_TO_SERIAL: %d\n", SEND_CSI_TO_SERIAL);
     printf("SEND_CSI_TO_SD: %d\n", SEND_CSI_TO_SD);
     printf("-----------------------\n");
-    printf("ISAC MODE\n");
+    printf("ISAC passive mode on channel %d\n", WIFI_CHANNEL);
+    printf("  comm_class labels each CSI row automatically:\n");
+    printf("    video/voice/browsing/data/idle/mgmt\n");
     printf("  Compile-time MAC filter:\n");
 #ifdef CONFIG_ISAC_WATCH_MAC_1
     if (strlen(CONFIG_ISAC_WATCH_MAC_1) > 0) printf("    MAC_1: %s\n", CONFIG_ISAC_WATCH_MAC_1);
@@ -77,15 +79,6 @@ void config_print() {
 #ifdef CONFIG_ISAC_WATCH_MAC_4
     if (strlen(CONFIG_ISAC_WATCH_MAC_4) > 0) printf("    MAC_4: %s\n", CONFIG_ISAC_WATCH_MAC_4);
 #endif
-    printf("  Runtime commands:\n");
-    printf("    SCAN              - find your router's channel automatically\n");
-    printf("    CHANNEL: <n>      - switch to channel n (1-13) without reflashing\n");
-    printf("    BANDWIDTH: <mode> - 20 | 40above | 40below (default: 40above)\n");
-    printf("                        use 40above/40below if hotspot MAC is missing\n");
-    printf("    WATCHMAC: <mac>   - filter CSI to this MAC (e.g. your router BSSID)\n");
-    printf("    CLEARMAC          - remove all MAC filters\n");
-    printf("    TAG: <label>      - label subsequent CSI rows\n");
-    printf("    SETTIME: <unix>   - set real-time clock\n");
     printf("-----------------------\n");
     printf("\n\n\n\n\n\n\n\n");
 }
@@ -96,29 +89,16 @@ void passive_init() {
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_NULL));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    // WIFI_PROMIS_FILTER_MASK_DATA alone only passes legacy single-MPDU frames.
-    // 802.11n/ac traffic (YouTube, any HT/VHT data) is sent as A-MPDU aggregated
-    // frames. Without DATA_MPDU and DATA_AMPDU in the mask those frames are
-    // silently dropped before the promiscuous callback fires, which is why all
-    // captured frames show sig_mode=0 and the hotspot MAC never appears.
     const wifi_promiscuous_filter_t filt = {
             .filter_mask = WIFI_PROMIS_FILTER_MASK_DATA |
                            WIFI_PROMIS_FILTER_MASK_DATA_MPDU |
-                           WIFI_PROMIS_FILTER_MASK_DATA_AMPDU
+                           WIFI_PROMIS_FILTER_MASK_DATA_AMPDU |
+                           WIFI_PROMIS_FILTER_MASK_MGMT
     };
-
-    int curChannel = WIFI_CHANNEL;
 
     esp_wifi_set_promiscuous(true);
     esp_wifi_set_promiscuous_filter(&filt);
-    // WIFI_SECOND_CHAN_NONE (HT20) misses 802.11n HT40 frames from modern APs/hotspots.
-    // iPhone hotspot and most 802.11n APs negotiate HT40 with capable clients.
-    // HT40 data frames span the primary + secondary channel simultaneously.
-    // Use WIFI_SECOND_CHAN_ABOVE to capture 40MHz frames where secondary is above
-    // the primary (e.g. primary=ch6, secondary=ch10 — the most common arrangement).
-    // If the hotspot MAC still does not appear, try WIFI_SECOND_CHAN_BELOW instead,
-    // or use the runtime CHANNEL: command to switch and observe.
-    esp_wifi_set_channel(curChannel, WIFI_SECOND_CHAN_ABOVE);
+    esp_wifi_set_channel(WIFI_CHANNEL, WIFI_SECOND_CHAN_ABOVE);
 }
 
 extern "C" void app_main(void) {

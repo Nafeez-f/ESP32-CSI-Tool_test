@@ -45,9 +45,10 @@ def carrier_plot(amp):
 
 
 def process(res):
-    # Parser
     all_data = res.split(',')
-    csi_data = all_data[25].split(" ")
+    # CSI_DATA is at column index 34 in the current CSV layout.
+    csi_field = all_data[34] if len(all_data) > 34 else all_data[25]
+    csi_data = csi_field.split(" ")
     csi_data[0] = csi_data[0].replace("[", "")
     csi_data[-1] = csi_data[-1].replace("]", "")
 

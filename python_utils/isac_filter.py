@@ -14,11 +14,12 @@ comm_class is determined AUTOMATICALLY from frame metadata — no human commands
 needed.  Just collect data and run this script.  The ESP32 reads TID and
 sig_len from every frame header and classifies it on-device:
 
+  mgmt       — management frame (beacon, probe, etc.) — suppressed by default
   video      — TID 4/5 or sig_len > 800 bytes  (YouTube, Netflix, video calls)
   voice      — TID 6/7                          (VoIP, FaceTime audio)
   browsing   — TID 0/3 and sig_len > 200 bytes  (web pages loading)
   background — TID 1/2                          (cloud sync, OS updates)
-  idle       — sig_len <= 100 bytes             (only ACKs, no application data)
+  idle       — sig_len <= 100 bytes             (only keepalives, null data)
   data       — everything else
 
 env_label is OPTIONAL and set via the TAG: serial command.  Use it only when
@@ -80,6 +81,7 @@ from collections import defaultdict
 COL_MAC        = 2
 COL_RSSI       = 3
 COL_RATE       = 4
+COL_SIG_MODE   = 5
 COL_MCS        = 6
 COL_NOISE_FL   = 14
 COL_AMPDU_CNT  = 15
@@ -97,7 +99,7 @@ COL_COMM_CLASS = 32   # automatic, from firmware
 COL_ENV_LABEL  = 33   # optional, from TAG: command
 COL_CSI        = 34
 
-COMM_CLASS_ORDER = ["video", "voice", "browsing", "data", "background", "idle"]
+COMM_CLASS_ORDER = ["video", "voice", "browsing", "data", "background", "idle", "mgmt"]
 
 
 # ---- CLI -------------------------------------------------------------------
@@ -151,6 +153,11 @@ def parse_args():
     p.add_argument(
         "--stats", action="store_true", default=True,
         help="Print per-comm_class statistics (default: on)",
+    )
+    p.add_argument(
+        "--listmacs", action="store_true",
+        help="Print per-MAC summary table (frame counts, direction, RSSI, "
+             "comm_class breakdown) to help identify your hotspot BSSID",
     )
     return p.parse_args()
 
@@ -232,6 +239,7 @@ def load_csv(path, watch_macs=None, comm_class_filter=None, env_label_filter=Non
                 "mac":            mac,
                 "rssi":           _int_or(parts[COL_RSSI]),
                 "rate":           _int_or(parts[COL_RATE]),
+                "sig_mode":       _int_or(parts[COL_SIG_MODE]),
                 "mcs":            _int_or(parts[COL_MCS]),
                 "noise_floor":    _int_or(parts[COL_NOISE_FL]),
                 "ampdu_cnt":      _int_or(parts[COL_AMPDU_CNT]),
@@ -355,7 +363,6 @@ def plot_isac_analysis(rows, window_sec=1.0):
     mean_amps = np.array([sum(r["amplitudes"]) / len(r["amplitudes"]) for r in rows])
     classes  = [r["comm_class"] for r in rows]
 
-    # Colour map per comm_class
     cls_colors = {
         "video":      "#e74c3c",
         "voice":      "#9b59b6",
@@ -363,6 +370,7 @@ def plot_isac_analysis(rows, window_sec=1.0):
         "data":       "#1abc9c",
         "background": "#f39c12",
         "idle":       "#95a5a6",
+        "mgmt":       "#bdc3c7",
     }
 
     max_t = float(ts[-1])
@@ -485,7 +493,8 @@ def plot_csi_timeline(rows):
     classes = [r["comm_class"] for r in rows]
 
     cls_colors = {"video":"#e74c3c","voice":"#9b59b6","browsing":"#3498db",
-                  "data":"#1abc9c","background":"#f39c12","idle":"#95a5a6"}
+                  "data":"#1abc9c","background":"#f39c12","idle":"#95a5a6",
+                  "mgmt":"#bdc3c7"}
 
     fig, axes = plt.subplots(2, 1, figsize=(14, 8),
                              gridspec_kw={"height_ratios": [4, 1]})
@@ -530,7 +539,8 @@ def plot_mean_spectrum(rows_by_class, subcarrier=None):
         sys.exit(1)
 
     cls_colors = {"video":"#e74c3c","voice":"#9b59b6","browsing":"#3498db",
-                  "data":"#1abc9c","background":"#f39c12","idle":"#95a5a6"}
+                  "data":"#1abc9c","background":"#f39c12","idle":"#95a5a6",
+                  "mgmt":"#bdc3c7"}
 
     if subcarrier is not None:
         fig, ax = plt.subplots(figsize=(12, 4))
@@ -569,6 +579,65 @@ def plot_mean_spectrum(rows_by_class, subcarrier=None):
     ax2.legend()
     plt.tight_layout()
     plt.show()
+
+
+# ---- Per-MAC summary -------------------------------------------------------
+
+def print_mac_summary(rows_all):
+    """Print a per-MAC table to help identify the hotspot BSSID."""
+    from collections import defaultdict
+
+    mac_info = defaultdict(lambda: {
+        "count": 0, "rssi_sum": 0, "max_sig_len": 0, "ht_frames": 0,
+        "classes": defaultdict(int), "n_up": 0, "n_down": 0, "n_mgmt": 0,
+    })
+
+    for r in rows_all:
+        m = mac_info[r["mac"]]
+        m["count"] += 1
+        m["rssi_sum"] += r["rssi"]
+        if r["sig_len"] > m["max_sig_len"]:
+            m["max_sig_len"] = r["sig_len"]
+        if r["sig_mode"] > 0:
+            m["ht_frames"] += 1
+        m["classes"][r["comm_class"]] += 1
+        if r["direction"] == "uplink":
+            m["n_up"] += 1
+        elif r["direction"] == "downlink":
+            m["n_down"] += 1
+        if r["comm_class"] == "mgmt":
+            m["n_mgmt"] += 1
+
+    total_ht = sum(m["ht_frames"] for m in mac_info.values())
+
+    print("\n=== Per-MAC summary (use this to find your hotspot BSSID) ===\n")
+    print(f"{'MAC':<19s} {'Frames':>6s} {'HT':>5s} {'RSSI':>5s} {'MaxLen':>6s} "
+          f"{'Up':>4s} {'Down':>4s} {'Mgmt':>5s}  Top classes")
+    print("-" * 85)
+
+    for mac in sorted(mac_info, key=lambda m: mac_info[m]["count"], reverse=True):
+        m = mac_info[mac]
+        avg_rssi = m["rssi_sum"] // m["count"] if m["count"] else 0
+        top_cls = sorted(m["classes"].items(), key=lambda x: -x[1])
+        cls_str = ", ".join(f"{c}={n}" for c, n in top_cls[:4])
+        print(f"{mac:<19s} {m['count']:>6d} {m['ht_frames']:>5d} {avg_rssi:>5d} "
+              f"{m['max_sig_len']:>6d} {m['n_up']:>4d} {m['n_down']:>4d} "
+              f"{m['n_mgmt']:>5d}  {cls_str}")
+
+    print("-" * 85)
+
+    if total_ht == 0:
+        print("WARNING: No HT/VHT frames in this capture (HT column all zeros)!")
+        print("  You only captured legacy-rate frames (beacons, keepalives).")
+        print("  The real data traffic was likely using HT40 which the ESP32 missed.")
+        print("  Re-capture with: BANDWIDTH: 40above  or run SCAN (tests all modes).")
+    else:
+        print(f"HT column = 802.11n/ac frames ({total_ht} total). "
+              f"Your hotspot has strong RSSI + high HT count.")
+
+    print("Your laptop MAC shows uplink frames. "
+          "Hotspot BSSID shows mgmt (beacons) + data.")
+    print()
 
 
 # ---- File output -----------------------------------------------------------
@@ -611,6 +680,9 @@ def main():
     rows_by_class = defaultdict(list)
     for r in rows_all:
         rows_by_class[r["comm_class"]].append(r)
+
+    if args.listmacs:
+        print_mac_summary(rows_all)
 
     if args.stats:
         stats = compute_stats(rows_by_class)

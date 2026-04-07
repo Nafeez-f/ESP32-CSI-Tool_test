@@ -103,6 +103,110 @@ typedef struct {
 static mac_frame_cache_t _mac_frame_cache[MAC_CACHE_SIZE];
 static int _mac_frame_cache_count = 0;
 
+// ---- Per-MAC discovery stats (for LISTMACS command) -----------------------
+// Tracks every unique sender MAC seen on the channel with counts and RSSI,
+// so the user can identify their hotspot BSSID without external tools.
+
+#define MAC_STATS_SIZE 32
+
+typedef struct {
+    uint8_t  mac[6];
+    bool     used;
+    uint32_t data_frames;
+    uint32_t mgmt_frames;
+    uint32_t ht_frames;       // sig_mode > 0 (HT/VHT — real traffic)
+    int32_t  rssi_sum;
+    uint32_t rssi_count;
+    uint8_t  last_to_ds;
+    uint8_t  last_from_ds;
+    uint32_t max_sig_len;
+} mac_stats_entry_t;
+
+static mac_stats_entry_t _mac_stats[MAC_STATS_SIZE];
+static int _mac_stats_count = 0;
+
+static mac_stats_entry_t* _mac_stats_find_or_create(const uint8_t mac[6]) {
+    for (int i = 0; i < _mac_stats_count; i++) {
+        if (_mac_stats[i].used && memcmp(_mac_stats[i].mac, mac, 6) == 0)
+            return &_mac_stats[i];
+    }
+    if (_mac_stats_count < MAC_STATS_SIZE) {
+        mac_stats_entry_t *e = &_mac_stats[_mac_stats_count++];
+        memset(e, 0, sizeof(*e));
+        memcpy(e->mac, mac, 6);
+        e->used = true;
+        return e;
+    }
+    return NULL;
+}
+
+void frame_header_print_mac_stats() {
+    printf("\n=== MACs seen on this channel ===\n");
+    printf("%-19s %6s %6s %5s %5s %6s %s\n",
+           "MAC", "Data", "Mgmt", "HT", "RSSI", "MaxLen", "Direction");
+    printf("-------------------------------------------------------------------\n");
+
+    uint32_t total_ht = 0;
+    for (int i = 0; i < _mac_stats_count; i++) {
+        mac_stats_entry_t *e = &_mac_stats[i];
+        if (!e->used) continue;
+        total_ht += e->ht_frames;
+        int avg_rssi = e->rssi_count > 0 ? (int)(e->rssi_sum / (int32_t)e->rssi_count) : 0;
+        const char *dir = "?";
+        if (e->last_to_ds && !e->last_from_ds) dir = "uplink";
+        else if (!e->last_to_ds && e->last_from_ds) dir = "downlink";
+        else if (!e->last_to_ds && !e->last_from_ds) dir = "AP/mgmt";
+        printf("%02X:%02X:%02X:%02X:%02X:%02X %6lu %6lu %5lu %5d %6lu  %s\n",
+               e->mac[0], e->mac[1], e->mac[2],
+               e->mac[3], e->mac[4], e->mac[5],
+               (unsigned long)e->data_frames,
+               (unsigned long)e->mgmt_frames,
+               (unsigned long)e->ht_frames,
+               avg_rssi,
+               (unsigned long)e->max_sig_len,
+               dir);
+    }
+    printf("-------------------------------------------------------------------\n");
+
+    if (total_ht == 0) {
+        printf("WARNING: No HT/VHT frames seen (HT column all zeros)!\n");
+        printf("  This means you are only capturing legacy-rate frames (beacons,\n");
+        printf("  keepalives). Your hotspot's data traffic is likely using HT40.\n");
+        printf("  Try:  BANDWIDTH: 40above  or  BANDWIDTH: 40below\n");
+        printf("  Or run SCAN which now tests all bandwidth modes automatically.\n\n");
+    } else {
+        printf("HT column = 802.11n/ac frames (the real data traffic).\n");
+        printf("Your hotspot: strong RSSI + high HT count + data+mgmt frames.\n");
+    }
+    printf("Use  WATCHMAC: <mac>  to filter to your hotspot + laptop.\n\n");
+}
+
+// ---- Single-frame context for CSI callback correlation ---------------------
+// The promiscuous RX callback runs BEFORE the CSI callback for every received
+// frame (both execute in the Wi-Fi driver task, sequentially).  This struct
+// passes the 802.11 frame type so the CSI callback can distinguish data from
+// management frames — critical for ISAC because beacons generate valid CSI but
+// carry no application data and would otherwise flood the output.
+
+typedef struct {
+    uint8_t  mac[6];
+    wifi_promiscuous_pkt_type_t pkt_type;  // WIFI_PKT_MGMT, WIFI_PKT_DATA, …
+    bool     fresh;   // set by promisc CB, cleared when consumed by CSI CB
+} _frame_ctx_t;
+
+static _frame_ctx_t _last_frame_ctx = {{0}, (wifi_promiscuous_pkt_type_t)0, false};
+
+// Called by CSI callback.  Returns the wifi_promiscuous_pkt_type_t if the
+// promiscuous callback just processed a frame from this MAC.
+// Returns -1 if no correlation is available (frame type not in filter).
+static int frame_header_consume_pkt_type(const uint8_t mac[6]) {
+    if (_last_frame_ctx.fresh && memcmp(_last_frame_ctx.mac, mac, 6) == 0) {
+        _last_frame_ctx.fresh = false;
+        return (int)_last_frame_ctx.pkt_type;
+    }
+    return -1;
+}
+
 static mac_frame_cache_t* _cache_find_or_create(const uint8_t mac[6]) {
     for (int i = 0; i < _mac_frame_cache_count; i++) {
         if (memcmp(_mac_frame_cache[i].mac, mac, 6) == 0)
@@ -136,18 +240,34 @@ const mac_frame_cache_t* frame_header_get(const uint8_t mac[6]) {
 // ---- Promiscuous RX callback ----------------------------------------------
 
 static void _frame_header_promiscuous_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
-    if (type != WIFI_PKT_DATA) return;
-
     const wifi_promiscuous_pkt_t *pkt = (const wifi_promiscuous_pkt_t *) buf;
     const uint8_t *payload = pkt->payload;
     uint16_t pkt_len = pkt->rx_ctrl.sig_len;
 
-    // Need at least 24 bytes for the basic 802.11 MAC header
     if (pkt_len < 24) return;
 
     const ieee80211_mac_hdr_t *hdr = (const ieee80211_mac_hdr_t *) payload;
     uint16_t fc = hdr->frame_ctrl;
 
+    // Record frame type + sender MAC so the CSI callback can correlate.
+    memcpy(_last_frame_ctx.mac, hdr->addr2, 6);
+    _last_frame_ctx.pkt_type = type;
+    _last_frame_ctx.fresh    = true;
+
+    // Update per-MAC discovery stats (for LISTMACS command)
+    mac_stats_entry_t *st = _mac_stats_find_or_create(hdr->addr2);
+    if (st) {
+        if (type == WIFI_PKT_MGMT) st->mgmt_frames++;
+        else                       st->data_frames++;
+        if (pkt->rx_ctrl.sig_mode > 0) st->ht_frames++;
+        st->rssi_sum += pkt->rx_ctrl.rssi;
+        st->rssi_count++;
+        if (pkt_len > st->max_sig_len) st->max_sig_len = pkt_len;
+        st->last_to_ds   = FC_TO_DS(fc);
+        st->last_from_ds = FC_FROM_DS(fc);
+    }
+
+    // Only fill the per-MAC detail cache for DATA frames.
     if (FC_TYPE(fc) != FC_TYPE_DATA) return;
 
     uint8_t subtype = FC_SUBTYPE(fc);

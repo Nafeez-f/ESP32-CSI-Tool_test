@@ -31,41 +31,132 @@ void _set_channel(int ch) {
         printf("CHANNEL: invalid value %d (must be 1-13 for 2.4 GHz)\n", ch);
         return;
     }
-    esp_err_t err = esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+    // Preserve the current HT40 secondary-channel setting when switching.
+    uint8_t cur_primary;
+    wifi_second_chan_t cur_second;
+    esp_wifi_get_channel(&cur_primary, &cur_second);
+    esp_err_t err = esp_wifi_set_channel(ch, cur_second);
     if (err == ESP_OK) {
-        printf("CHANNEL: now listening on channel %d\n", ch);
+        printf("CHANNEL: now listening on channel %d (secondary=%s)\n", ch,
+               cur_second==WIFI_SECOND_CHAN_NONE?"none":
+               cur_second==WIFI_SECOND_CHAN_ABOVE?"above":"below");
     } else {
         printf("CHANNEL: failed to set channel %d (err 0x%x)\n", ch, err);
     }
 }
 
-// Scan all 2.4 GHz channels for 2 seconds each and print frame counts.
-// This lets you find your router's channel without a separate tool.
-void _do_channel_scan() {
-    printf("\nSCAN: cycling channels 1-13, 2 seconds each...\n");
-    printf("SCAN: the channel with the most frames is your router's channel.\n");
+// Test HT20/HT40-above/HT40-below on a SINGLE channel and pick the best.
+// Called at boot to find the right bandwidth without changing the user's channel.
+void _do_bandwidth_scan(int channel, int dwell_ms) {
+    printf("BW-SCAN: testing HT20, HT40-above, HT40-below on channel %d (%d ms each)...\n\n",
+           channel, dwell_ms);
+
+    ESP_ERROR_CHECK(esp_wifi_set_csi_rx_cb(&_scan_csi_cb, NULL));
+
+    const wifi_second_chan_t modes[] = {
+        WIFI_SECOND_CHAN_NONE, WIFI_SECOND_CHAN_ABOVE, WIFI_SECOND_CHAN_BELOW
+    };
+    const char *mode_names[] = {"HT20", "HT40-above", "HT40-below"};
+
+    int best_count = 0;
+    wifi_second_chan_t best_mode = WIFI_SECOND_CHAN_ABOVE;
+    const char *best_name = "HT40-above";
+
+    for (int m = 0; m < 3; m++) {
+        _scan_frame_count = 0;
+        esp_err_t err = esp_wifi_set_channel(channel, modes[m]);
+        if (err != ESP_OK) {
+            printf("BW-SCAN: %s failed (err 0x%x), skipping\n", mode_names[m], err);
+            continue;
+        }
+        vTaskDelay(dwell_ms / portTICK_PERIOD_MS);
+        int cnt = _scan_frame_count;
+        int scaled = (cnt * 1000) / dwell_ms;
+        printf("BW-SCAN: %s -> %d frames/s %s\n",
+               mode_names[m], scaled, cnt > best_count ? " <- BEST" : "");
+        if (cnt > best_count) {
+            best_count = cnt;
+            best_mode = modes[m];
+            best_name = mode_names[m];
+        }
+    }
+
+    ESP_ERROR_CHECK(esp_wifi_set_csi_rx_cb(&_wifi_csi_cb, NULL));
+    esp_wifi_set_channel(channel, best_mode);
+    printf("\nBW-SCAN: channel %d locked to %s (%d frames/s)\n",
+           channel, best_name, (best_count * 1000) / dwell_ms);
+
+    printf("BW-SCAN: collecting MACs for 5 seconds...\n");
+    vTaskDelay(5000 / portTICK_PERIOD_MS);
+    frame_header_print_mac_stats();
+}
+
+// Scan all 2.4 GHz channels trying HT20/HT40-above/HT40-below per channel.
+// dwell_ms = how long to listen per mode (500 for auto-boot, 1000 for manual).
+// If print_macs is true, prints LISTMACS table after scan completes.
+void _do_channel_scan_ex(int dwell_ms, bool print_macs) {
+    printf("\nSCAN: cycling channels 1-13...\n");
+    printf("SCAN: testing HT20, HT40-above, HT40-below (%d ms each).\n", dwell_ms);
     printf("SCAN: (CSI rows are suppressed during scan)\n\n");
 
-    // Swap in the counting callback
     ESP_ERROR_CHECK(esp_wifi_set_csi_rx_cb(&_scan_csi_cb, NULL));
 
     int best_ch = 1, best_count = 0;
+    wifi_second_chan_t best_second = WIFI_SECOND_CHAN_ABOVE;
+
+    const wifi_second_chan_t modes[] = {
+        WIFI_SECOND_CHAN_NONE, WIFI_SECOND_CHAN_ABOVE, WIFI_SECOND_CHAN_BELOW
+    };
+    const char *mode_names[] = {"HT20", "HT40a", "HT40b"};
+
     for (int ch = 1; ch <= 13; ch++) {
-        _scan_frame_count = 0;
-        esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
-        vTaskDelay(2000 / portTICK_PERIOD_MS);
-        int cnt = _scan_frame_count;
-        printf("SCAN: ch %2d  →  %3d frames/2s %s\n",
-               ch, cnt, cnt > best_count ? "  ← best so far" : "");
-        if (cnt > best_count) { best_count = cnt; best_ch = ch; }
+        int ch_best = 0;
+        wifi_second_chan_t ch_best_mode = WIFI_SECOND_CHAN_NONE;
+        const char *ch_best_name = "HT20";
+
+        for (int m = 0; m < 3; m++) {
+            _scan_frame_count = 0;
+            esp_err_t err = esp_wifi_set_channel(ch, modes[m]);
+            if (err != ESP_OK) continue;
+            vTaskDelay(dwell_ms / portTICK_PERIOD_MS);
+            int cnt = _scan_frame_count;
+            if (cnt > ch_best) {
+                ch_best = cnt;
+                ch_best_mode = modes[m];
+                ch_best_name = mode_names[m];
+            }
+        }
+
+        int scaled = (ch_best * 1000) / dwell_ms;
+        printf("SCAN: ch %2d  ->  %4d frames/s  best_mode=%s %s\n",
+               ch, scaled, ch_best_name,
+               ch_best > best_count ? "  <- BEST" : "");
+        if (ch_best > best_count) {
+            best_count = ch_best;
+            best_ch = ch;
+            best_second = ch_best_mode;
+        }
     }
 
-    printf("\nSCAN: done. Best channel: %d (%d frames)\n", best_ch, best_count);
-    printf("SCAN: run  CHANNEL: %d  to lock onto it.\n\n", best_ch);
+    const char *sec_str = best_second==WIFI_SECOND_CHAN_NONE?"HT20":
+                          best_second==WIFI_SECOND_CHAN_ABOVE?"HT40-above":"HT40-below";
+    int scaled_best = (best_count * 1000) / dwell_ms;
+    printf("\nSCAN: done. Best: channel %d, %s (%d frames/s)\n",
+           best_ch, sec_str, scaled_best);
 
-    // Restore the real CSI callback and stay on the best channel
     ESP_ERROR_CHECK(esp_wifi_set_csi_rx_cb(&_wifi_csi_cb, NULL));
-    _set_channel(best_ch);
+    esp_wifi_set_channel(best_ch, best_second);
+    printf("SCAN: now locked to channel %d with %s.\n\n", best_ch, sec_str);
+
+    if (print_macs) {
+        printf("SCAN: collecting MACs for 5 seconds...\n");
+        vTaskDelay(5000 / portTICK_PERIOD_MS);
+        frame_header_print_mac_stats();
+    }
+}
+
+void _do_channel_scan() {
+    _do_channel_scan_ex(1000, true);
 }
 
 // ---- Command dispatcher --------------------------------------------------
@@ -124,13 +215,22 @@ void _handle_input() {
         done:;
 
     } else if (strcmp(input_buffer, "SCAN") == 0) {
-        // SCAN  — cycle channels 1-13, 2s each, print frame counts.
-        // Use this to discover your router's channel automatically.
         _do_channel_scan();
+
+    } else if (strcmp(input_buffer, "SHOWMGMT") == 0) {
+        isac_show_mgmt = true;
+        printf("Management frame CSI now INCLUDED in output\n");
+
+    } else if (strcmp(input_buffer, "HIDEMGMT") == 0) {
+        isac_show_mgmt = false;
+        printf("Management frame CSI now SUPPRESSED\n");
+
+    } else if (strcmp(input_buffer, "LISTMACS") == 0) {
+        frame_header_print_mac_stats();
 
     } else {
         printf("Unknown command: '%s'\n", input_buffer);
-        printf("Commands: SETTIME | TAG | WATCHMAC | CLEARMAC | CHANNEL | SCAN\n");
+        printf("Commands: SETTIME | TAG | WATCHMAC | CLEARMAC | CHANNEL | BANDWIDTH | SCAN | SHOWMGMT | HIDEMGMT | LISTMACS\n");
     }
 }
 
